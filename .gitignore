@@ -33,3 +33,9 @@ demos/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local agent config
+.claude/
+CLAUDE.md
+AGENTS.md
+.mcp.json
