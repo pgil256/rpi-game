@@ -358,6 +358,16 @@ Press **M** to toggle mute. Sound files are optional - games work silently if mi
 - This is intended behavior - B returns to menu from games
 - B does nothing at the main menu (only ESC exits the app)
 
+## Bundled game sources
+
+The launcher runs the game modules in `games/*.py`. The repository also includes game-specific source and asset folders.
+
+| Component | Source and scope |
+| --- | --- |
+| Pac-Man | The [bundled README](games/pacman/README.md) identifies [hbokmann/Pacman](https://github.com/hbokmann/Pacman) as the source of the Windows installer. The launcher uses `games/pacman.py`. |
+| Boulder Dash sound effects | The [game README](games/boulder-dash/README.md) credits the effects to [irmen/bouldercaves](https://github.com/irmen/bouldercaves). |
+| Archived implementations | The [archive notes](games/_archive/README.md) list the legacy files and explain which modules the launcher loads. |
+
 ## License
 
 Educational/personal use project.
