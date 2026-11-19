@@ -1,104 +1,46 @@
-#!/bin/bash
-# Weasel Entertainment System - Install Autostart on Boot
-# This script configures the game to run automatically on boot
-
-set -e
-
+#!/usr/bin/env bash
+# Choose ONE autostart backend: desktop (default) or console kiosk.
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="wes-game"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-
-echo "=========================================="
-echo "  Installing WES Autostart Service"
-echo "=========================================="
-echo ""
-
-# Detect the current user (not root)
-if [ "$SUDO_USER" ]; then
-    RUN_USER="$SUDO_USER"
+MODE="${1:-desktop}"
+RUN_USER="${SUDO_USER:-$(id -un)}"
+if [[ "$RUN_USER" == root ]]; then
+    echo 'Run from the intended non-root user account (sudo is allowed).' >&2
+    exit 1
+fi
+if [[ "$MODE" != desktop && "$MODE" != console ]]; then
+    echo 'Usage: ./install_autostart.sh [desktop|console]' >&2
+    exit 1
+fi
+RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+[[ -n "$RUN_HOME" && -d "$RUN_HOME" && -x "$SCRIPT_DIR/.venv/bin/python" ]] || {
+    echo 'User home or .venv missing. Run setup_rpi.sh first.' >&2; exit 1;
+}
+# Render and validate before changing either startup backend.
+PYTHON="$SCRIPT_DIR/.venv/bin/python"
+CONFIG="$("$PYTHON" "$SCRIPT_DIR/scripts/autostart_config.py" "$MODE" "$SCRIPT_DIR" "$RUN_USER" "$RUN_HOME")"
+chmod +x "$SCRIPT_DIR/start.sh" "$SCRIPT_DIR/run_game.sh"
+AUTOSTART_DIR="$RUN_HOME/.config/autostart"
+# Install as the selected user, including newly-created parent directories.
+sudo -u "$RUN_USER" mkdir -p "$AUTOSTART_DIR"
+sudo rm -f -- "$AUTOSTART_DIR/wes.desktop" "$AUTOSTART_DIR/wes-game.desktop"
+if [[ "$MODE" == desktop ]]; then
+    if [[ -e /etc/systemd/system/wes-game.service ]]; then
+        sudo systemctl disable --now wes-game.service
+    fi
+    printf '%s\n' "$CONFIG" | sudo -u "$RUN_USER" tee "$AUTOSTART_DIR/wes-game.desktop" >/dev/null
 else
-    RUN_USER="$(whoami)"
+    GROUPS_TO_ADD=""
+    for group in input video render; do
+        if getent group "$group" >/dev/null; then
+            GROUPS_TO_ADD="${GROUPS_TO_ADD:+$GROUPS_TO_ADD,}$group"
+        fi
+    done
+    if [[ -n "$GROUPS_TO_ADD" ]]; then
+        sudo usermod -a -G "$GROUPS_TO_ADD" "$RUN_USER"
+    fi
+    printf '%s\n' "$CONFIG" | sudo tee /etc/systemd/system/wes-game.service >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable wes-game.service
 fi
-
-# For Raspberry Pi, typically the user is 'pi'
-if [ "$RUN_USER" = "root" ]; then
-    RUN_USER="pi"
-fi
-
-echo "Game will run as user: $RUN_USER"
-echo "Game directory: $SCRIPT_DIR"
-echo ""
-
-# Ensure user has access to input and video devices for kiosk mode
-echo "Adding user to required groups for kiosk mode..."
-sudo usermod -a -G input,video,render,tty "$RUN_USER" 2>/dev/null || true
-
-# Create the systemd service file
-echo "Creating systemd service..."
-sudo tee "$SERVICE_FILE" > /dev/null << EOF
-[Unit]
-Description=Weasel Entertainment System Game Launcher
-After=multi-user.target systemd-user-sessions.service
-Conflicts=getty@tty1.service
-Wants=graphical.target
-
-[Service]
-Type=simple
-User=$RUN_USER
-WorkingDirectory=$SCRIPT_DIR
-Environment="SDL_VIDEODRIVER=kmsdrm"
-Environment="SDL_NOMOUSE=1"
-# Required for kmsdrm access without X11
-TTYPath=/dev/tty1
-StandardInput=tty
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
-ExecStart=/usr/bin/python3 $SCRIPT_DIR/game_launcher.py --fullscreen
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Alternative: Create an autostart desktop entry (for desktop environments)
-AUTOSTART_DIR="/home/$RUN_USER/.config/autostart"
-mkdir -p "$AUTOSTART_DIR"
-
-cat > "$AUTOSTART_DIR/wes-game.desktop" << EOF
-[Desktop Entry]
-Type=Application
-Name=Weasel Entertainment System
-Exec=$SCRIPT_DIR/run_game.sh
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-Comment=Launch WES game on startup
-EOF
-
-chown "$RUN_USER:$RUN_USER" "$AUTOSTART_DIR/wes-game.desktop"
-
-# Enable and start the service
-echo "Enabling systemd service..."
-sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-
-echo ""
-echo "=========================================="
-echo "  Autostart Installation Complete!"
-echo "=========================================="
-echo ""
-echo "The game will now start automatically on boot."
-echo ""
-echo "Useful commands:"
-echo "  sudo systemctl start $SERVICE_NAME    # Start now"
-echo "  sudo systemctl stop $SERVICE_NAME     # Stop the game"
-echo "  sudo systemctl status $SERVICE_NAME   # Check status"
-echo "  sudo systemctl disable $SERVICE_NAME  # Disable autostart"
-echo ""
-echo "To test immediately, reboot with:"
-echo "  sudo reboot"
-echo ""
+printf 'Installed %s startup for %s. Console kiosk restarts after Quit; stop it with sudo systemctl stop wes-game.\n' "$MODE" "$RUN_USER"

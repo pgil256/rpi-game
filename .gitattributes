@@ -1,0 +1,15 @@
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.png binary
+*.wav binary
+*.exe binary
+*.spec text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+# Preserve the original bytes of the archived third-party Python sources.
+legacy_reference/games/_archive/*.py -text

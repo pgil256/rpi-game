@@ -1,3 +1,9 @@
+> Historical proposal and session claims, superseded on 2026-11-14.
+> The old COMPLETE labels below were not verification and included incorrect
+> claims about constants/enums, asset unloading, recorded demos and fullscreen.
+> See [the audit resolution ledger](2026-11-14-audit-resolution.md) and the current
+> README for implemented behavior and remaining release conditions.
+
 # WES Improvement Plan
 
 Comprehensive plan to improve the Weasel Entertainment System across four areas: release readiness, new features, code quality, and performance.
@@ -8,10 +14,10 @@ Comprehensive plan to improve the Weasel Entertainment System across four areas:
 
 | Phase | Status | Completed |
 |-------|--------|-----------|
-| Phase 1: Code Quality | **COMPLETE** | 2026-01-07 |
-| Phase 2: Release Readiness | Not Started | - |
-| Phase 3: New Features | Not Started | - |
-| Phase 4: Performance & Platform | Not Started | - |
+| Phase 1: Code Quality | Superseded; see audit ledger | 2026-11-14 |
+| Phase 2: Release Readiness | Superseded; see audit ledger | 2026-11-14 |
+| Phase 3: New Features | Superseded; see audit ledger | 2026-11-14 |
+| Phase 4: Performance & Platform | Superseded; see audit ledger | 2026-11-14 |
 
 ---
 
@@ -392,31 +398,31 @@ Recommended sequence for maximum impact:
 
 ```
 Phase 1: Code Quality - COMPLETE
-├── 1.1 Consolidate duplicates ........... DONE
-├── 1.2 Extract constants ................ DONE
-├── 1.3 Add state enums .................. DONE
-├── 1.4 Fix encapsulation ................ DONE
-└── 1.5 Update engine exports ............ DONE
+â”œâ”€â”€ 1.1 Consolidate duplicates ........... DONE
+â”œâ”€â”€ 1.2 Extract constants ................ DONE
+â”œâ”€â”€ 1.3 Add state enums .................. DONE
+â”œâ”€â”€ 1.4 Fix encapsulation ................ DONE
+â””â”€â”€ 1.5 Update engine exports ............ DONE
 
 Phase 2: Release Readiness - UP NEXT
-├── 2.1 Pause functionality
-├── 2.2 High score persistence
-├── 2.3 Settings menu
-├── 2.4 Error handling
-└── 2.5 Exit handling
+â”œâ”€â”€ 2.1 Pause functionality
+â”œâ”€â”€ 2.2 High score persistence
+â”œâ”€â”€ 2.3 Settings menu
+â”œâ”€â”€ 2.4 Error handling
+â””â”€â”€ 2.5 Exit handling
 
 Phase 3: Features
-├── 3.1 Difficulty levels
-├── 3.2 Achievements
-├── 3.3 Demo mode
-└── 3.4 Statistics
+â”œâ”€â”€ 3.1 Difficulty levels
+â”œâ”€â”€ 3.2 Achievements
+â”œâ”€â”€ 3.3 Demo mode
+â””â”€â”€ 3.4 Statistics
 
 Phase 4: Performance
-├── 4.1 RPi optimization
-├── 4.2 Memory optimization
-├── 4.3 Startup optimization
-├── 4.4 Platform testing
-└── 4.5 Packaging
+â”œâ”€â”€ 4.1 RPi optimization
+â”œâ”€â”€ 4.2 Memory optimization
+â”œâ”€â”€ 4.3 Startup optimization
+â”œâ”€â”€ 4.4 Platform testing
+â””â”€â”€ 4.5 Packaging
 ```
 
 ---

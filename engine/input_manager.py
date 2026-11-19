@@ -1,28 +1,25 @@
 """
-Input Manager for Weasel Entertainment System
+Input Manager for Winston Entertainment System
 
 Consolidates all gamepad/keyboard input handling into a single class.
 Provides edge detection, unified keyboard/gamepad interface, and configurable button mappings.
 """
 
 import pygame
-import os
-import json
+from collections import deque
+from engine.persistence import JsonStore, data_path
+from engine.controller_mapping import (
+    BUTTON_NAMES,
+    controller_profile,
+    save_profile,
+    decode_bindings,
+    valid_bindings,
+)
+from engine import BUTTON_A, BUTTON_B, BUTTON_SELECT, BUTTON_START, DEADZONE
 
 
-# Path to controller configuration file
-_CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "controller_config.json")
-
-
-def _load_controller_config():
-    """Load controller configuration from file if it exists."""
-    if os.path.exists(_CONFIG_FILE):
-        try:
-            with open(_CONFIG_FILE, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return None
+def _controller_store():
+    return JsonStore(data_path("controller_config.json"), legacy_name="controller_config.json")
 
 
 class InputManager:
@@ -51,31 +48,31 @@ class InputManager:
     # Default button mappings for USB Gamepad
     # Buttons 1=A, 2=B, 8=Select, 9=Start
     DEFAULT_BUTTON_MAP = {
-        'a': 1,           # A button (confirm/action)
-        'b': 2,           # B button (back/cancel)
-        'select': 8,      # Select button
-        'start': 9,       # Start button
+        "a": BUTTON_A,  # A button (confirm/action)
+        "b": BUTTON_B,  # B button (back/cancel)
+        "select": BUTTON_SELECT,  # Select button
+        "start": BUTTON_START,  # Start button
     }
 
     # Default keyboard mappings
     DEFAULT_KEY_MAP = {
-        'up': [pygame.K_UP, pygame.K_w],
-        'down': [pygame.K_DOWN, pygame.K_s],
-        'left': [pygame.K_LEFT, pygame.K_a],
-        'right': [pygame.K_RIGHT, pygame.K_d],
-        'action': [pygame.K_RETURN, pygame.K_SPACE],
-        'back': [pygame.K_ESCAPE, pygame.K_BACKSPACE],
-        'start': [pygame.K_RETURN],
-        'select': [pygame.K_TAB],
-        'pause': [pygame.K_p],
+        "up": [pygame.K_UP, pygame.K_w],
+        "down": [pygame.K_DOWN, pygame.K_s],
+        "left": [pygame.K_LEFT, pygame.K_a],
+        "right": [pygame.K_RIGHT, pygame.K_d],
+        "action": [pygame.K_RETURN, pygame.K_SPACE],
+        "back": [pygame.K_ESCAPE, pygame.K_BACKSPACE],
+        "start": [],
+        "select": [pygame.K_TAB],
+        "pause": [pygame.K_p],
     }
 
     # Constants for USB Gamepad
-    BUTTON_A = 1
-    BUTTON_B = 2
-    BUTTON_SELECT = 8
-    BUTTON_START = 9
-    DEADZONE = 0.3
+    BUTTON_A = BUTTON_A
+    BUTTON_B = BUTTON_B
+    BUTTON_SELECT = BUTTON_SELECT
+    BUTTON_START = BUTTON_START
+    DEADZONE = DEADZONE
 
     def __init__(self, button_map=None, key_map=None, deadzone=None):
         """
@@ -89,17 +86,14 @@ class InputManager:
             deadzone: Analog stick deadzone threshold (0.0 to 1.0).
                      Defaults to 0.3.
         """
-        self.button_map = button_map or self.DEFAULT_BUTTON_MAP.copy()
+        self.button_map = self.DEFAULT_BUTTON_MAP.copy()
+        if button_map:
+            self.button_map.update(button_map)
+        self._base_button_map = self.button_map.copy()
         self.key_map = key_map or self.DEFAULT_KEY_MAP.copy()
         self.deadzone = deadzone if deadzone is not None else self.DEADZONE
 
         # D-pad configuration (can be overridden by config file)
-        self.dpad_type = 'auto'  # 'auto', 'hat', or 'axes'
-        self.dpad_hat = 0
-        self.dpad_axes = {'x': None, 'y': None}
-        self.dpad_y_inverted = False
-
-        # Load configuration from file if it exists
         self._load_config()
 
         # Joystick reference
@@ -107,7 +101,7 @@ class InputManager:
 
         # State tracking for edge detection
         self._prev_buttons = {}  # Gamepad buttons: button_id -> bool
-        self._prev_keys = {}     # Keyboard keys: key_code -> bool
+        self._prev_keys = {}  # Keyboard keys: key_code -> bool
         self._prev_dpad = (0, 0)
 
         # Current frame state
@@ -115,29 +109,65 @@ class InputManager:
         self._curr_keys = {}
         self._curr_dpad = (0, 0)
 
+        self._menu_direction = (0, 0)
+        self._menu_next_repeat = 0
+        self._next_joystick_check = 0
+        # SDL may deliver a complete tap between simulation steps. Keep the
+        # events until update consumes them, independent of final held state.
+        self._pending_key_presses = set()
+        self._pending_key_releases = set()
+        self._pending_button_presses = set()
+        self._pending_button_releases = set()
+        self._event_pressed_keys = set()
+        self._event_released_keys = set()
+        self._event_pressed_buttons = set()
+        self._event_released_buttons = set()
+        self._pending_directions = deque(maxlen=16)
+        self._direction_keys = set()
+        self._event_hats = {}
+        self._event_axes = {}
+        self._event_pad_buttons = {}
+        self._suppressed_keys = set()
+
         # Initialize joystick
         self.init_joystick()
 
-    def _load_config(self):
-        """Load controller configuration from file."""
-        config = _load_controller_config()
+    def _load_config(self, guid=None):
+        """Select this device's bindings, with defaults for a new controller."""
+        self.button_map = self._base_button_map.copy()
+        self.dpad_type = "auto"
+        self.dpad_hat = 0
+        self.dpad_axes = {"x": None, "y": None}
+        self.dpad_y_inverted = False
+        self.dpad_bindings = None
+        self._profile_guid = None
+        config = controller_profile(_controller_store().load(), guid)
         if config:
             print(f"Loaded controller config: {config.get('controller_name', 'Unknown')}")
 
             # Apply button mappings
-            if 'buttons' in config:
-                for name, button_id in config['buttons'].items():
-                    self.button_map[name] = button_id
+            if isinstance(config.get("buttons"), dict):
+                for name, button_id in config["buttons"].items():
+                    if isinstance(button_id, int) and button_id >= 0:
+                        self.button_map[name] = button_id
 
             # Apply D-pad configuration
-            if 'dpad_type' in config:
-                self.dpad_type = config['dpad_type']
-            if 'dpad_hat' in config:
-                self.dpad_hat = config['dpad_hat']
-            if 'dpad_axes' in config:
-                self.dpad_axes = config['dpad_axes']
-            if 'dpad_y_inverted' in config:
-                self.dpad_y_inverted = config['dpad_y_inverted']
+            if config.get("dpad_type") in ("auto", "hat", "axes", "bindings"):
+                self.dpad_type = config["dpad_type"]
+            if isinstance(config.get("dpad_hat"), int) and config["dpad_hat"] >= 0:
+                self.dpad_hat = config["dpad_hat"]
+            if isinstance(config.get("dpad_axes"), dict):
+                self.dpad_axes = {
+                    key: value if isinstance(value, int) and value >= 0 else None
+                    for key, value in config["dpad_axes"].items()
+                }
+            if isinstance(config.get("dpad_y_inverted"), bool):
+                self.dpad_y_inverted = config["dpad_y_inverted"]
+            self._profile_guid = config.get("controller_guid")
+            if valid_bindings(config.get("dpad_bindings")):
+                self.dpad_bindings = config["dpad_bindings"]
+            elif self.dpad_type == "bindings":
+                self.dpad_type = "auto"
 
     def init_joystick(self):
         """
@@ -146,16 +176,20 @@ class InputManager:
         Returns:
             bool: True if a joystick was detected, False otherwise.
         """
-        pygame.joystick.quit()
-        pygame.joystick.init()
+        if not pygame.joystick.get_init():
+            pygame.joystick.init()
 
         if pygame.joystick.get_count() > 0:
             self.joystick = pygame.joystick.Joystick(0)
             self.joystick.init()
+            self._load_config(self.joystick.get_guid())
+            self._seed_gamepad_events()
             print(f"Controller detected: {self.joystick.get_name()}")
-            print(f"  Buttons: {self.joystick.get_numbuttons()}, "
-                  f"Axes: {self.joystick.get_numaxes()}, "
-                  f"Hats: {self.joystick.get_numhats()}")
+            print(
+                f"  Buttons: {self.joystick.get_numbuttons()}, "
+                f"Axes: {self.joystick.get_numaxes()}, "
+                f"Hats: {self.joystick.get_numhats()}"
+            )
             return True
 
         self.joystick = None
@@ -187,10 +221,23 @@ class InputManager:
         This captures the current state of all inputs and moves the previous
         frame's state to the previous state buffer for edge detection.
         """
+        if self.joystick is None and pygame.time.get_ticks() >= self._next_joystick_check:
+            self._next_joystick_check = pygame.time.get_ticks() + 500
+            self.init_joystick()
         # Move current state to previous
         self._prev_buttons = self._curr_buttons.copy()
         self._prev_keys = self._curr_keys.copy()
         self._prev_dpad = self._curr_dpad
+        self._event_pressed_keys, self._pending_key_presses = self._pending_key_presses, set()
+        self._event_released_keys, self._pending_key_releases = self._pending_key_releases, set()
+        self._event_pressed_buttons, self._pending_button_presses = (
+            self._pending_button_presses,
+            set(),
+        )
+        self._event_released_buttons, self._pending_button_releases = (
+            self._pending_button_releases,
+            set(),
+        )
 
         # Capture current gamepad button state
         self._curr_buttons = {}
@@ -202,16 +249,28 @@ class InputManager:
             except pygame.error:
                 # Joystick became invalid (e.g., pygame reinitialized)
                 self.joystick = None
+        # One-step pulses also let held-action consumers (automatic firing)
+        # respond once to a short tap, without sticking after release.
+        for button in self._event_pressed_buttons:
+            self._curr_buttons[button] = True
+        for button in self._dpad_button_ids():
+            self._curr_buttons.pop(button, None)
 
         # Capture current keyboard state
         keys = pygame.key.get_pressed()
+        self._suppressed_keys = {key for key in self._suppressed_keys if keys[key]}
         self._curr_keys = {}
         for key_list in self.key_map.values():
             for key in key_list:
-                self._curr_keys[key] = keys[key]
+                self._curr_keys[key] = keys[key] and key not in self._suppressed_keys
+        self._direction_keys = {key for key, held in self._curr_keys.items() if held}
+        for key in self._event_pressed_keys:
+            self._curr_keys[key] = True
 
         # Capture current D-pad state
         self._curr_dpad = self._read_dpad_raw()
+        if self._pending_directions:
+            self._curr_dpad = self._pending_directions.popleft()
 
     def _read_dpad_raw(self):
         """
@@ -224,99 +283,147 @@ class InputManager:
 
         # Check keyboard first
         keys = pygame.key.get_pressed()
-        for key in self.key_map.get('left', []):
+        for key in self.key_map.get("left", []):
             if keys[key]:
                 dx = -1
                 break
         if dx == 0:
-            for key in self.key_map.get('right', []):
+            for key in self.key_map.get("right", []):
                 if keys[key]:
                     dx = 1
                     break
 
-        for key in self.key_map.get('up', []):
+        for key in self.key_map.get("up", []):
             if keys[key]:
                 dy = -1
                 break
         if dy == 0:
-            for key in self.key_map.get('down', []):
+            for key in self.key_map.get("down", []):
                 if keys[key]:
                     dy = 1
                     break
 
-        # Gamepad overrides keyboard if active
-        if self.joystick:
-            try:
-                gp_dx, gp_dy = 0, 0
-
-                # Use configured D-pad type, or auto-detect
-                use_hat = False
-                use_axes = False
-
-                if self.dpad_type == 'hat':
-                    use_hat = True
-                elif self.dpad_type == 'axes':
-                    use_axes = True
-                else:  # 'auto' - try hat first, then axes
-                    use_hat = self.joystick.get_numhats() > 0
-                    use_axes = True  # Fallback
-
-                # Method 1: Hat/POV
-                if use_hat and self.joystick.get_numhats() > self.dpad_hat:
-                    hat = self.joystick.get_hat(self.dpad_hat)
-                    gp_dx = hat[0]
-                    gp_dy = -hat[1]  # Hat Y is inverted
-
-                # Method 2: Axes (if configured or as fallback)
-                if (use_axes and gp_dx == 0 and gp_dy == 0):
-                    num_axes = self.joystick.get_numaxes()
-
-                    # Use configured axes if available
-                    x_axis = self.dpad_axes.get('x')
-                    y_axis = self.dpad_axes.get('y')
-
-                    if x_axis is not None and x_axis < num_axes:
-                        # Use configured X axis
-                        ax = self.joystick.get_axis(x_axis)
-                        if ax < -self.deadzone:
-                            gp_dx = -1
-                        elif ax > self.deadzone:
-                            gp_dx = 1
-                    elif num_axes >= 1:
-                        # Fallback: try axis 0 for X
-                        ax = self.joystick.get_axis(0)
-                        if ax < -self.deadzone:
-                            gp_dx = -1
-                        elif ax > self.deadzone:
-                            gp_dx = 1
-
-                    if y_axis is not None and y_axis < num_axes:
-                        # Use configured Y axis
-                        ax = self.joystick.get_axis(y_axis)
-                        if self.dpad_y_inverted:
-                            ax = -ax
-                        if ax < -self.deadzone:
-                            gp_dy = -1
-                        elif ax > self.deadzone:
-                            gp_dy = 1
-                    elif num_axes >= 2:
-                        # Fallback: try axis 1 for Y
-                        ax = self.joystick.get_axis(1)
-                        if ax < -self.deadzone:
-                            gp_dy = -1
-                        elif ax > self.deadzone:
-                            gp_dy = 1
-
-                # Gamepad overrides keyboard if gamepad has input
-                if gp_dx != 0:
-                    dx = gp_dx
-                if gp_dy != 0:
-                    dy = gp_dy
-            except pygame.error:
-                # Joystick became invalid
-                self.joystick = None
+        snapshot = self.raw_controller_state()
+        if snapshot is not None:
+            gx, gy = self._decode_gamepad(
+                dict(enumerate(snapshot["axes"])),
+                dict(enumerate(snapshot["hats"])),
+                dict(enumerate(snapshot["buttons"])),
+            )
+            dx, dy = gx or dx, gy or dy
 
         return (dx, dy)
+
+    def raw_controller_state(self):
+        """Actual hardware values for the controller test and guided calibration."""
+        if self.joystick is None:
+            return None
+        try:
+            return {
+                "axes": [self.joystick.get_axis(i) for i in range(self.joystick.get_numaxes())],
+                "hats": [self.joystick.get_hat(i) for i in range(self.joystick.get_numhats())],
+                "buttons": [
+                    bool(self.joystick.get_button(i)) for i in range(self.joystick.get_numbuttons())
+                ],
+            }
+        except pygame.error:
+            self.joystick = None
+            return None
+
+    def _seed_gamepad_events(self):
+        snapshot = self.raw_controller_state()
+        if snapshot is not None:
+            self._event_axes = dict(enumerate(snapshot["axes"]))
+            self._event_hats = dict(enumerate(snapshot["hats"]))
+            self._event_pad_buttons = dict(enumerate(snapshot["buttons"]))
+
+    def _decode_gamepad(self, axes, hats, buttons):
+        # Polling and event buffering must interpret the same physical controls.
+        mode = self.dpad_type
+        other_controller = False
+        if mode == "bindings" and self.dpad_bindings is not None:
+            if not self._profile_guid or self._profile_guid == self.joystick.get_guid():
+                return decode_bindings(self.dpad_bindings, axes, hats, buttons)
+            mode = "auto"  # A different controller must not inherit this calibration.
+            other_controller = True
+        hat_index = 0 if other_controller else self.dpad_hat
+        if mode == "hat" or (mode == "auto" and hat_index in hats):
+            hx, hy = hats.get(hat_index, (0, 0))
+            return hx, -hy
+        x_index = 0 if other_controller else self.dpad_axes.get("x")
+        y_index = 1 if other_controller else self.dpad_axes.get("y")
+        x = axes.get(0 if x_index is None else x_index, 0)
+        y = axes.get(1 if y_index is None else y_index, 0)
+        if self.dpad_y_inverted and not other_controller:
+            y = -y
+
+        def digital(value):
+            return -1 if value < -self.deadzone else 1 if value > self.deadzone else 0
+
+        return digital(x), digital(y)
+
+    def _dpad_button_ids(self):
+        """Calibrated D-pad buttons must not also confirm, pause, or leave a game."""
+        if (
+            self.joystick is not None
+            and self.dpad_type == "bindings"
+            and self.dpad_bindings is not None
+            and (not self._profile_guid or self._profile_guid == self.joystick.get_guid())
+        ):
+            return {
+                binding["index"]
+                for binding in self.dpad_bindings.values()
+                if binding["kind"] == "button"
+            }
+        return set()
+
+    def save_dpad_calibration(self, bindings):
+        if self.joystick is None or not valid_bindings(bindings):
+            return False
+        guid = self.joystick.get_guid()
+        if not save_profile(
+            _controller_store(),
+            guid,
+            self.joystick.get_name(),
+            {"dpad_type": "bindings", "dpad_bindings": bindings},
+        ):
+            return False
+        self.dpad_bindings = bindings
+        self.dpad_type = "bindings"
+        self._profile_guid = guid
+        self._pending_directions.clear()
+        self._curr_dpad = self._prev_dpad = (0, 0)
+        self.reset_repeat()
+        self._seed_gamepad_events()
+        return True
+
+    def save_button_mapping(self, buttons):
+        if self.joystick is None or not buttons:
+            return False
+        reserved = self._dpad_button_ids()
+        limit = self.joystick.get_numbuttons()
+        for name, number in buttons.items():
+            if (
+                name not in BUTTON_NAMES
+                or type(number) is not int
+                or not 0 <= number < limit
+                or number in reserved
+            ):
+                return False
+        updated = {**self.button_map, **buttons}
+        if any(
+            sum(value == number for value in updated.values()) > 1 for number in buttons.values()
+        ):
+            return False
+        if not save_profile(
+            _controller_store(),
+            self.joystick.get_guid(),
+            self.joystick.get_name(),
+            {"buttons": buttons},
+        ):
+            return False
+        self.button_map = updated
+        return True
 
     def get_dpad(self):
         """
@@ -346,9 +453,7 @@ class InputManager:
         Returns:
             bool: True if the button is pressed, False otherwise.
         """
-        if self.joystick and button_id < self.joystick.get_numbuttons():
-            return self.joystick.get_button(button_id)
-        return False
+        return bool(self._curr_buttons.get(button_id, False))
 
     def is_pressed(self, name):
         """
@@ -385,6 +490,10 @@ class InputManager:
         Returns:
             bool: True if the button was pressed this frame but not last frame.
         """
+        if any(key in self._event_pressed_keys for key in self.key_map.get(name, ())):
+            return True
+        if self.button_map.get(name) in self._event_pressed_buttons:
+            return True
         curr = False
         prev = False
 
@@ -416,6 +525,10 @@ class InputManager:
         Returns:
             bool: True if the button was released this frame (was pressed, now isn't).
         """
+        if any(key in self._event_released_keys for key in self.key_map.get(name, ())):
+            return True
+        if self.button_map.get(name) in self._event_released_buttons:
+            return True
         curr = False
         prev = False
 
@@ -438,53 +551,141 @@ class InputManager:
         return prev and not curr
 
     def get_any_action_button(self):
-        """
-        Check if any action button is pressed (A, Start, or common action buttons).
-        Maintains compatibility with existing game_launcher.py function.
-
-        Returns:
-            bool: True if any action button is pressed.
-        """
-        # Check keyboard
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_RETURN] or keys[pygame.K_SPACE]:
-            return True
-
-        # Check gamepad
-        if not self.joystick:
-            return False
-
-        num_buttons = self.joystick.get_numbuttons()
-        # Check buttons 0, 1, A, Start (common action buttons)
-        for b in [0, 1, self.BUTTON_A, self.BUTTON_START]:
-            if b < num_buttons and self.joystick.get_button(b):
-                return True
-
-        return False
+        return self.is_pressed("action") or self.is_pressed("a")
 
     def get_any_back_button(self):
-        """
-        Check if any back button is pressed (B, Select, or ESC).
-        Maintains compatibility with existing game_launcher.py function.
+        return self.is_pressed("back") or self.is_pressed("b") or self.is_pressed("select")
 
-        Returns:
-            bool: True if any back button is pressed.
-        """
-        # Check keyboard
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_ESCAPE] or keys[pygame.K_BACKSPACE]:
-            return True
+    def confirm_pressed(self):
+        """Menu confirmation includes Start; in-game action deliberately does not."""
+        return self.action_pressed() or self.was_pressed("start")
 
-        # Check gamepad
-        if not self.joystick:
-            return False
+    def menu_direction(self, now_ms=None, initial_delay=250, repeat_delay=120):
+        """One direction per tap, then controlled repeats while held."""
+        now = pygame.time.get_ticks() if now_ms is None else now_ms
+        direction = self.get_dpad()
+        # Resolve diagonals to one axis, avoiding phantom two-axis tile moves.
+        if direction[1]:
+            direction = (0, direction[1])
+        if direction != self._menu_direction:
+            self._menu_direction = direction
+            self._menu_next_repeat = now + initial_delay
+            return direction
+        if direction != (0, 0) and now >= self._menu_next_repeat:
+            self._menu_next_repeat = now + repeat_delay
+            return direction
+        return (0, 0)
 
-        num_buttons = self.joystick.get_numbuttons()
-        for b in [self.BUTTON_B, self.BUTTON_SELECT]:
-            if b < num_buttons and self.joystick.get_button(b):
-                return True
+    def reset_repeat(self):
+        self._menu_direction = self.get_dpad()
+        self._menu_next_repeat = pygame.time.get_ticks() + 250
 
-        return False
+    def handle_event(self, event):
+        """Forward SDL events before update so short taps and hot-plug survive."""
+        if event.type in (pygame.KEYDOWN, pygame.KEYUP):
+            if event.key in self._suppressed_keys:
+                if event.type == pygame.KEYUP:
+                    self._suppressed_keys.discard(event.key)
+                return
+            pressed = event.type == pygame.KEYDOWN
+            if pressed and getattr(event, "repeat", False):
+                return
+            pending = self._pending_key_presses if pressed else self._pending_key_releases
+            pending.add(event.key)
+            if pressed:
+                self._direction_keys.add(event.key)
+            else:
+                self._direction_keys.discard(event.key)
+            if any(
+                event.key in self.key_map.get(name, ()) for name in ("up", "down", "left", "right")
+            ):
+                self._queue_event_direction()
+            return
+        if event.type in (
+            pygame.JOYBUTTONDOWN,
+            pygame.JOYBUTTONUP,
+            pygame.JOYHATMOTION,
+            pygame.JOYAXISMOTION,
+        ):
+            if self.joystick is None:
+                return
+            try:
+                if (
+                    hasattr(event, "instance_id")
+                    and event.instance_id != self.joystick.get_instance_id()
+                ):
+                    return
+            except pygame.error:
+                return
+            if event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP):
+                pending = (
+                    self._pending_button_presses
+                    if event.type == pygame.JOYBUTTONDOWN
+                    else self._pending_button_releases
+                )
+                if event.button not in self._dpad_button_ids():
+                    pending.add(event.button)
+                self._event_pad_buttons[event.button] = event.type == pygame.JOYBUTTONDOWN
+                if self.dpad_type == "bindings":
+                    self._queue_event_direction()
+            elif event.type == pygame.JOYHATMOTION:
+                self._event_hats[event.hat] = event.value
+                self._queue_event_direction()
+            elif event.type == pygame.JOYAXISMOTION:
+                self._event_axes[event.axis] = event.value
+                self._queue_event_direction()
+            return
+        if event.type == pygame.JOYDEVICEADDED and self.joystick is None:
+            self.init_joystick()
+        elif event.type == pygame.JOYDEVICEREMOVED and self.joystick is not None:
+            try:
+                removed = self.joystick.get_instance_id() == event.instance_id
+            except pygame.error:
+                removed = True
+            if removed:
+                self.joystick = None
+                self._curr_buttons.clear()
+                self._next_joystick_check = 0
+                self._pending_button_presses.clear()
+                self._pending_button_releases.clear()
+                self._pending_directions.clear()
+                self._event_hats.clear()
+                self._event_axes.clear()
+                self._event_pad_buttons.clear()
+
+    def discard_pending(self):
+        """Drop input accumulated before a focus or control-mapping transition."""
+        self._pending_directions.clear()
+        self._pending_button_presses.clear()
+        self._pending_button_releases.clear()
+        self._pending_key_presses.clear()
+        self._pending_key_releases.clear()
+        self.update()
+        self._seed_gamepad_events()
+        self.reset_repeat()
+
+    def suppress_key(self, key):
+        """A global shortcut such as Alt+Enter must not also fire a game action."""
+        self._suppressed_keys.add(key)
+        self._pending_key_presses.discard(key)
+        self._event_pressed_keys.discard(key)
+        self._curr_keys[key] = False
+        self._prev_keys[key] = False
+
+    def _queue_event_direction(self):
+        """Preserve directional changes (including release) in arrival order."""
+        held = lambda name: any(key in self._direction_keys for key in self.key_map.get(name, ()))
+        dx = -1 if held("left") else 1 if held("right") else 0
+        dy = -1 if held("up") else 1 if held("down") else 0
+        if self.joystick is not None:
+            pad_x, pad_y = self._decode_gamepad(
+                self._event_axes, self._event_hats, self._event_pad_buttons
+            )
+            dx, dy = pad_x or dx, pad_y or dy
+        direction = (dx, dy)
+        previous = self._pending_directions[-1] if self._pending_directions else self._curr_dpad
+        if direction != previous:
+            self._pending_directions.append(direction)
 
     def action_pressed(self):
         """
@@ -494,7 +695,7 @@ class InputManager:
         Returns:
             bool: True if action button was pressed this frame.
         """
-        return self.was_pressed('action') or self.was_pressed('a') or self.was_pressed('start')
+        return self.was_pressed("action") or self.was_pressed("a")
 
     def back_pressed(self):
         """
@@ -504,7 +705,7 @@ class InputManager:
         Returns:
             bool: True if back button was pressed this frame.
         """
-        return self.was_pressed('back') or self.was_pressed('b') or self.was_pressed('select')
+        return self.was_pressed("back") or self.was_pressed("b") or self.was_pressed("select")
 
     def pause_pressed(self):
         """
@@ -514,7 +715,7 @@ class InputManager:
         Returns:
             bool: True if pause button was pressed this frame.
         """
-        return self.was_pressed('pause') or self.was_pressed('start')
+        return self.was_pressed("pause") or self.was_pressed("start")
 
     def set_button_mapping(self, name, button_id):
         """
@@ -548,12 +749,17 @@ class InputManager:
         if not self.joystick:
             return None
 
-        return {
-            'name': self.joystick.get_name(),
-            'num_buttons': self.joystick.get_numbuttons(),
-            'num_axes': self.joystick.get_numaxes(),
-            'num_hats': self.joystick.get_numhats(),
-        }
+        try:
+            return {
+                "name": self.joystick.get_name(),
+                "num_buttons": self.joystick.get_numbuttons(),
+                "num_axes": self.joystick.get_numaxes(),
+                "num_hats": self.joystick.get_numhats(),
+            }
+        except pygame.error:
+            self.joystick = None
+            self._next_joystick_check = 0
+            return None
 
 
 # Module-level convenience functions for backwards compatibility
@@ -579,18 +785,8 @@ def init_joystick():
 
 
 def get_dpad():
-    """Backwards compatible get_dpad function."""
-    global _default_manager
-    try:
-        mgr = get_input_manager()
-        mgr.update()  # Ensure state is current
-        return mgr.get_dpad()
-    except pygame.error:
-        # Pygame was reinitialized, reset the manager
-        _default_manager = None
-        mgr = get_input_manager()
-        mgr.update()
-        return mgr.get_dpad()
+    """Return the current snapshot; the owner advances it once via update()."""
+    return get_input_manager().get_dpad()
 
 
 def get_button(button_id):

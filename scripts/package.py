@@ -1,198 +1,140 @@
 #!/usr/bin/env python3
-"""
-Packaging script for Weasel Entertainment System.
+"""Build tools for Winston Entertainment System.
 
-Usage:
-    python scripts/package.py [command]
-
-Commands:
-    install     Set up virtual environment and install dependencies
-    build       Build standalone executable using PyInstaller
-    clean       Remove build artifacts
-    rpi-setup   Set up for Raspberry Pi auto-start
+Usage: python scripts/package.py [install|build|clean|rpi-setup]
+Dependencies are installed only in .venv; rpi-setup selects desktop autostart.
 """
 
 import os
-import sys
+from pathlib import Path
 import shutil
 import subprocess
-from pathlib import Path
+import sys
 
-# Project root directory
-PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_command(cmd, cwd=None):
-    """Run a command and return success status."""
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd or PROJECT_ROOT)
-    return result.returncode == 0
+    """Run a command without a shell and report errors to the caller."""
+    print(f"Running: {' '.join(map(str, cmd))}")
+    try:
+        return subprocess.run(cmd, cwd=cwd or PROJECT_ROOT, check=False).returncode == 0
+    except OSError as exc:
+        print(f"Could not start command: {exc}")
+        return False
+
+
+def venv_python():
+    relative = ("Scripts", "python.exe") if sys.platform == "win32" else ("bin", "python")
+    return PROJECT_ROOT.joinpath(".venv", *relative)
+
+
+def make_launchers_executable():
+    if sys.platform != "win32":
+        for name in ("start.sh", "run_game.sh", "setup_rpi.sh", "install_autostart.sh"):
+            path = PROJECT_ROOT / name
+            path.chmod(path.stat().st_mode | 0o111)
 
 
 def install():
-    """Set up virtual environment and install dependencies."""
-    venv_path = PROJECT_ROOT / '.venv'
-
-    # Create venv if it doesn't exist
-    if not venv_path.exists():
-        print("Creating virtual environment...")
-        if not run_command([sys.executable, '-m', 'venv', str(venv_path)]):
-            print("Failed to create virtual environment")
-            return False
-
-    # Determine pip path
-    if sys.platform == 'win32':
-        pip_path = venv_path / 'Scripts' / 'pip'
-    else:
-        pip_path = venv_path / 'bin' / 'pip'
-
-    # Upgrade pip
-    print("Upgrading pip...")
-    run_command([str(pip_path), 'install', '--upgrade', 'pip'])
-
-    # Install requirements
-    print("Installing dependencies...")
-    req_file = PROJECT_ROOT / 'requirements.txt'
-    if not run_command([str(pip_path), 'install', '-r', str(req_file)]):
-        print("Failed to install dependencies")
+    """Create or repair the venv and install the pinned runtime requirements."""
+    if sys.version_info < (3, 10):
+        print("Python 3.10 or newer is required.")
         return False
-
-    print("\nInstallation complete!")
-    print(f"Activate the virtual environment with:")
-    if sys.platform == 'win32':
-        print(f"  {venv_path}\\Scripts\\activate")
-    else:
-        print(f"  source {venv_path}/bin/activate")
-    print(f"\nThen run: python game_launcher.py")
+    if not venv_python().is_file():
+        if not run_command([sys.executable, "-m", "venv", str(PROJECT_ROOT / ".venv")]):
+            return False
+    # Use the interpreter to avoid pip self-upgrade errors on Windows.
+    if not run_command(
+        [str(venv_python()), "-m", "pip", "install", "-r", str(PROJECT_ROOT / "requirements.txt")]
+    ):
+        return False
+    try:
+        make_launchers_executable()
+    except OSError as exc:
+        print(f"Cannot make launch scripts executable: {exc}")
+        return False
+    print(
+        "Installation complete. Run .venv Python with game_launcher.py, or ./run_game.sh on Linux."
+    )
     return True
 
 
 def build():
-    """Build standalone executable using PyInstaller."""
-    venv_path = PROJECT_ROOT / '.venv'
-
-    # Determine python/pip paths
-    if sys.platform == 'win32':
-        pip_path = venv_path / 'Scripts' / 'pip'
-        python_path = venv_path / 'Scripts' / 'python'
-    else:
-        pip_path = venv_path / 'bin' / 'pip'
-        python_path = venv_path / 'bin' / 'python'
-
-    # Ensure venv exists
-    if not venv_path.exists():
-        print("Virtual environment not found. Running install first...")
-        if not install():
-            return False
-
-    # Install PyInstaller
-    print("Installing PyInstaller...")
-    if not run_command([str(pip_path), 'install', 'pyinstaller']):
-        print("Failed to install PyInstaller")
+    """Build an onedir bundle with the current platform's Python."""
+    if not venv_python().is_file() and not install():
         return False
-
-    # Build with PyInstaller
-    print("Building executable...")
-    spec_file = PROJECT_ROOT / 'wes.spec'
-    if not run_command([str(python_path), '-m', 'PyInstaller', str(spec_file)]):
-        print("Build failed")
+    python = str(venv_python())
+    if not run_command([python, "-m", "pip", "install", "pyinstaller==6.19.0"]):
         return False
-
-    print("\nBuild complete!")
-    dist_path = PROJECT_ROOT / 'dist' / 'wes'
-    print(f"Executable located at: {dist_path}")
+    if not run_command([python, "-m", "PyInstaller", str(PROJECT_ROOT / "wes.spec")]):
+        return False
+    filename = "wes.exe" if sys.platform == "win32" else "wes"
+    print(f"Build complete: {PROJECT_ROOT / 'dist' / 'wes' / filename}")
     return True
 
 
+def _remove_artifact(path):
+    root = PROJECT_ROOT.resolve()
+    path = Path(path)
+    # Unlink a local symlink itself, never recursively remove its destination.
+    if path.is_symlink():
+        if not path.parent.resolve().is_relative_to(root):
+            raise ValueError(f"Refusing to remove an external link: {path}")
+        path.unlink()
+        return
+    resolved = path.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ValueError(f"Refusing to remove a path outside the project: {resolved}")
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
 def clean():
-    """Remove build artifacts."""
-    dirs_to_remove = ['build', 'dist', '__pycache__']
-    files_to_remove = ['*.pyc', '*.pyo', '*.spec.bak']
-
-    for dir_name in dirs_to_remove:
-        dir_path = PROJECT_ROOT / dir_name
-        if dir_path.exists():
-            print(f"Removing {dir_path}...")
-            shutil.rmtree(dir_path)
-
-    # Clean __pycache__ in subdirectories
-    for pycache in PROJECT_ROOT.rglob('__pycache__'):
-        print(f"Removing {pycache}...")
-        shutil.rmtree(pycache)
-
-    print("Clean complete!")
+    """Clean project build output without traversing dependency or archive trees."""
+    try:
+        for name in ("build", "dist", "__pycache__"):
+            _remove_artifact(PROJECT_ROOT / name)
+        root = PROJECT_ROOT.resolve()
+        for name in ("engine", "games", "scripts", "tests"):
+            directory = PROJECT_ROOT / name
+            if not directory.is_dir() or not directory.resolve().is_relative_to(root):
+                continue
+            for parent, dirs, _ in os.walk(directory, followlinks=False):
+                dirs[:] = [
+                    name
+                    for name in dirs
+                    if name not in (".venv", "legacy_reference", ".git")
+                    and not (Path(parent) / name).is_symlink()
+                    and (Path(parent) / name).resolve().is_relative_to(root)
+                ]
+                if "__pycache__" in dirs:
+                    _remove_artifact(Path(parent) / "__pycache__")
+                    dirs.remove("__pycache__")
+    except (OSError, ValueError) as exc:
+        print(f"Clean failed: {exc}")
+        return False
+    print("Clean complete.")
     return True
 
 
 def rpi_setup():
-    """Set up for Raspberry Pi auto-start."""
-    if sys.platform == 'win32':
-        print("This command is only for Linux/Raspberry Pi")
+    """Use the single autostart installer after preparing executable launchers."""
+    if not sys.platform.startswith("linux"):
+        print("This command requires Linux/Raspberry Pi OS.")
         return False
-
-    # First run install
     if not install():
         return False
-
-    # Create desktop entry
-    desktop_entry = """[Desktop Entry]
-Type=Application
-Name=Weasel Entertainment System
-Comment=Classic arcade games with weasel theming
-Exec={script_path}
-Icon={icon_path}
-Terminal=false
-Categories=Game;
-X-GNOME-Autostart-enabled=true
-"""
-
-    script_path = PROJECT_ROOT / 'start.sh'
-    icon_path = PROJECT_ROOT / 'media' / 'weasel.png'
-
-    entry_content = desktop_entry.format(
-        script_path=script_path,
-        icon_path=icon_path
-    )
-
-    # Write to autostart directory
-    autostart_dir = Path.home() / '.config' / 'autostart'
-    autostart_dir.mkdir(parents=True, exist_ok=True)
-
-    desktop_file = autostart_dir / 'wes.desktop'
-    desktop_file.write_text(entry_content)
-    print(f"Created autostart entry: {desktop_file}")
-
-    # Make start.sh executable
-    run_command(['chmod', '+x', str(script_path)])
-
-    print("\nRaspberry Pi setup complete!")
-    print("The game will start automatically on login.")
-    print(f"To start manually: {script_path}")
-    return True
+    return run_command(["bash", str(PROJECT_ROOT / "install_autostart.sh"), "desktop"])
 
 
 def main():
-    commands = {
-        'install': install,
-        'build': build,
-        'clean': clean,
-        'rpi-setup': rpi_setup,
-    }
-
-    if len(sys.argv) < 2:
+    commands = {"install": install, "build": build, "clean": clean, "rpi-setup": rpi_setup}
+    if len(sys.argv) != 2 or sys.argv[1] not in commands:
         print(__doc__)
-        print("\nAvailable commands:", ', '.join(commands.keys()))
         return 1
-
-    cmd = sys.argv[1]
-    if cmd not in commands:
-        print(f"Unknown command: {cmd}")
-        print("Available commands:", ', '.join(commands.keys()))
-        return 1
-
-    success = commands[cmd]()
-    return 0 if success else 1
+    return 0 if commands[sys.argv[1]]() else 1
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

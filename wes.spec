@@ -1,75 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
-PyInstaller spec file for Weasel Entertainment System.
+"""Only active runtime media; game modules are discovered through imports."""
+from pathlib import Path
 
-Build with:
-    pyinstaller wes.spec
-
-This creates a single-folder distribution in dist/wes/
-Run with: dist/wes/wes (Linux) or dist/wes/wes.exe (Windows)
-"""
-
-import sys
-import os
-
-block_cipher = None
-
-# Collect data files
-datas = [
-    ('media', 'media'),
-    ('sounds', 'sounds'),
-    ('games', 'games'),
-]
-
-# Add optional directories if they exist
-for optional_dir in ['demos', 'docs']:
-    if os.path.isdir(optional_dir):
-        datas.append((optional_dir, optional_dir))
-
-a = Analysis(
-    ['game_launcher.py'],
-    pathex=[],
-    binaries=[],
-    datas=datas,
-    hiddenimports=['pygame'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False,
-)
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name='wes',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,  # Set to True for debugging
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=None,  # Add 'media/icon.ico' if you have an icon
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='wes',
-)
+# pygame has a filesystem fallback when pkg_resources is unavailable.
+# Excluding it avoids ambient setuptools hooks; no game uses numpy/surfarray.
+root = Path(SPECPATH)
+datas = [(str(root / "media" / name), "media") for name in
+         ("ferret-long-sprite.png", "ferret-long-sprite.json", "soupbowl.png")]
+datas += [(str(p), "sounds") for p in sorted((root / "sounds").glob("*.wav"))]
+a = Analysis([str(root / "game_launcher.py")], pathex=[str(root)], binaries=[],
+             datas=datas, hiddenimports=["pygame"], hookspath=[], hooksconfig={},
+             runtime_hooks=[], excludes=["numpy", "pkg_resources"], noarchive=False)
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="wes", debug=False,
+          bootloader_ignore_signals=False, strip=False, upx=False, console=False)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="wes")

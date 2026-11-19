@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-14",
+  "audit_findings": 117,
+  "pytest_passed": 147,
+  "pytest_skipped": 1,
+  "pytest_skip": "Git Bash cannot initialize inside Windows sandbox; all four scripts separately passed bash -n outside sandbox",
+  "ruff_check": "passed",
+  "ruff_format_check": "passed",
+  "windows_bundle_smoke": {
+    "exit_code": 0,
+    "seconds": 3.75,
+    "games": 6,
+    "difficulties": 3,
+    "steps_per_combination": 300,
+    "sha256": "ac0836f1deb970392368ef14c60d7e5bf24e8a31ba4494a9084fc0954106a52a"
+  },
+  "archival_files_verified_unchanged": 167,
+  "limitations": [
+    "Raspberry Pi hardware boot/display/audio",
+    "physical controller unplug/replug",
+    "physical power-cut testing",
+    "public distribution rights/owner license confirmation"
+  ]
+}

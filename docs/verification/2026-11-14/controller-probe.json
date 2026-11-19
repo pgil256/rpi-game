@@ -1,0 +1,10 @@
+{
+  "controller_detected": {
+    "name": "HID-compliant game controller",
+    "num_buttons": 10,
+    "num_axes": 5,
+    "num_hats": 0
+  },
+  "original_handle_still_initialized": true,
+  "original_handle_buttons_after_second_manager": 10
+}

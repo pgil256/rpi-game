@@ -1,5 +1,5 @@
 """
-Achievement system for the Weasel Entertainment System.
+Achievement system for the Winston Entertainment System.
 
 Tracks and stores player achievements across all games.
 Achievements are unlocked based on gameplay events and persist to JSON.
@@ -23,8 +23,7 @@ Usage:
         print("Achievement unlocked!")
 """
 
-import json
-from pathlib import Path
+from engine.persistence import JsonStore, data_path, is_demo
 from datetime import datetime
 from typing import Optional
 
@@ -50,7 +49,6 @@ ACHIEVEMENTS = {
         "game": "global",
         "hidden": False,
     },
-
     # Snake achievements
     "snake_first": {
         "name": "Slithery Start",
@@ -76,11 +74,10 @@ ACHIEVEMENTS = {
         "game": "snake",
         "hidden": False,
     },
-
-    # Pac-Man achievements
+    # Tunnel Treats achievements
     "pacman_first": {
         "name": "Pellet Muncher",
-        "desc": "Complete your first Pac-Man level",
+        "desc": "Complete your first Tunnel Treats level",
         "game": "pacman",
         "hidden": False,
     },
@@ -92,27 +89,26 @@ ACHIEVEMENTS = {
     },
     "pacman_1000": {
         "name": "High Scorer",
-        "desc": "Score 1000 points in Pac-Man",
+        "desc": "Score 1000 points in Tunnel Treats",
         "game": "pacman",
         "hidden": False,
     },
     "pacman_no_death": {
         "name": "Untouchable",
-        "desc": "Clear a Pac-Man level without dying",
+        "desc": "Clear a Tunnel Treats level without dying",
         "game": "pacman",
         "hidden": False,
     },
-
-    # Frogger achievements
+    # Ferret Crossing achievements
     "frogger_first": {
         "name": "Safe Crossing",
-        "desc": "Successfully cross the road in Frogger",
+        "desc": "Successfully cross the road in Ferret Crossing",
         "game": "frogger",
         "hidden": False,
     },
     "frogger_5": {
         "name": "Leap Master",
-        "desc": "Complete 5 crossings in Frogger",
+        "desc": "Complete 5 crossings in Ferret Crossing",
         "game": "frogger",
         "hidden": False,
     },
@@ -122,8 +118,7 @@ ACHIEVEMENTS = {
         "game": "frogger",
         "hidden": False,
     },
-
-    # Centipede achievements
+    # Burrow Defender achievements
     "centipede_first": {
         "name": "Bug Zapper",
         "desc": "Destroy your first centipede",
@@ -132,59 +127,57 @@ ACHIEVEMENTS = {
     },
     "centipede_500": {
         "name": "Exterminator",
-        "desc": "Score 500 points in Centipede",
+        "desc": "Score 500 points in Burrow Defender",
         "game": "centipede",
         "hidden": False,
     },
     "centipede_spider": {
         "name": "Arachnophobe",
-        "desc": "Destroy a spider in Centipede",
+        "desc": "Destroy a spider in Burrow Defender",
         "game": "centipede",
         "hidden": False,
     },
-
-    # Dig Dug achievements
+    # Crystal Quest achievements
     "digdug_first": {
         "name": "Tunnel Digger",
-        "desc": "Collect your first crystal in Dig Dug",
+        "desc": "Collect your first crystal in Crystal Quest",
         "game": "digdug",
         "hidden": False,
     },
     "digdug_win": {
         "name": "Crystal Collector",
-        "desc": "Collect all crystals in Dig Dug",
+        "desc": "Collect all crystals in Crystal Quest",
         "game": "digdug",
         "hidden": False,
     },
     "digdug_hard": {
         "name": "Brave Explorer",
-        "desc": "Win Dig Dug on Hard difficulty",
+        "desc": "Win Crystal Quest on Hard difficulty",
         "game": "digdug",
         "hidden": False,
     },
-
-    # Boulder Dash achievements
+    # Rocky Burrow achievements
     "boulder_first": {
         "name": "Diamond Hunter",
-        "desc": "Collect your first diamond in Boulder Dash",
+        "desc": "Collect your first diamond in Rocky Burrow",
         "game": "boulderdash",
         "hidden": False,
     },
     "boulder_level": {
         "name": "Cave Explorer",
-        "desc": "Complete a Boulder Dash level",
+        "desc": "Complete a Rocky Burrow level",
         "game": "boulderdash",
         "hidden": False,
     },
     "boulder_all": {
         "name": "Treasure Master",
-        "desc": "Complete all 5 Boulder Dash levels",
+        "desc": "Complete all 5 Rocky Burrow levels",
         "game": "boulderdash",
         "hidden": False,
     },
     "boulder_no_crush": {
         "name": "Quick Reflexes",
-        "desc": "Complete a Boulder Dash level without getting crushed",
+        "desc": "Complete a Rocky Burrow level without getting crushed",
         "game": "boulderdash",
         "hidden": True,  # Hidden achievement
     },
@@ -200,27 +193,27 @@ class AchievementManager:
         Args:
             save_file: Name of the JSON file to store achievements.
         """
-        self.save_path = Path(__file__).parent.parent / save_file
+        self.save_path = data_path(save_file)
+        self._store = JsonStore(self.save_path, legacy_name=save_file)
         self.unlocked = self._load()
+        self._dirty = False
         self.pending_notifications = []  # Achievements to show
 
     def _load(self) -> dict:
-        """Load unlocked achievements from file."""
-        if self.save_path.exists():
-            try:
-                data = json.loads(self.save_path.read_text())
-                return data.get("unlocked", {})
-            except (json.JSONDecodeError, IOError):
-                return {}
-        return {}
+        data = self._store.load().get("unlocked", {})
+        if not isinstance(data, dict):
+            return {}
+        return {
+            key: value
+            for key, value in data.items()
+            if key in ACHIEVEMENTS and isinstance(value, dict)
+        }
 
-    def save(self) -> None:
-        """Save unlocked achievements to file."""
-        data = {"unlocked": self.unlocked}
-        try:
-            self.save_path.write_text(json.dumps(data, indent=2))
-        except IOError:
-            pass  # Fail silently
+    def save(self):
+        saved = self._store.save({"unlocked": self.unlocked})
+        if saved:
+            self._dirty = False
+        return saved
 
     def unlock(self, achievement_id: str) -> bool:
         """Unlock an achievement.
@@ -231,25 +224,30 @@ class AchievementManager:
         Returns:
             True if newly unlocked, False if already unlocked or invalid.
         """
-        if achievement_id not in ACHIEVEMENTS:
+        if is_demo() or achievement_id not in ACHIEVEMENTS:
             return False
 
         if achievement_id in self.unlocked:
+            if self._dirty:
+                self.save()
             return False  # Already unlocked
 
         # Unlock the achievement
         self.unlocked[achievement_id] = {
             "timestamp": datetime.now().isoformat(),
         }
+        self._dirty = True
         self.save()
 
         # Queue notification
         achievement = ACHIEVEMENTS[achievement_id]
-        self.pending_notifications.append({
-            "id": achievement_id,
-            "name": achievement["name"],
-            "desc": achievement["desc"],
-        })
+        self.pending_notifications.append(
+            {
+                "id": achievement_id,
+                "name": achievement["name"],
+                "desc": achievement["desc"],
+            }
+        )
 
         return True
 
@@ -310,6 +308,8 @@ class AchievementManager:
         for aid, adata in ACHIEVEMENTS.items():
             if game is not None and adata["game"] != game:
                 continue
+            if adata.get("hidden", False) and aid not in self.unlocked:
+                continue
             total += 1
             if aid in self.unlocked:
                 unlocked += 1
@@ -342,31 +342,32 @@ class AchievementManager:
         """
         if stats_manager is None:
             from engine.stats_manager import get_stats_manager
+
             stats_manager = get_stats_manager()
 
         # Check first_win - any game completed
-        if not self.is_unlocked('first_win'):
-            games_completed = stats_manager.get('global', 'games_completed', 0)
+        if not self.is_unlocked("first_win"):
+            games_completed = stats_manager.get("global", "games_completed", 0)
             if games_completed > 0:
-                self.unlock('first_win')
+                self.unlock("first_win")
 
         # Check play_all - all 6 games played
-        if not self.is_unlocked('play_all'):
-            game_keys = ['snake', 'pacman', 'frogger', 'centipede', 'digdug', 'boulderdash']
+        if not self.is_unlocked("play_all"):
+            game_keys = ["snake", "pacman", "frogger", "centipede", "digdug", "boulderdash"]
             all_played = True
             for game in game_keys:
-                games_played = stats_manager.get(game, 'games_played', 0)
+                games_played = stats_manager.get(game, "games_played", 0)
                 if games_played == 0:
                     all_played = False
                     break
             if all_played:
-                self.unlock('play_all')
+                self.unlock("play_all")
 
         # Check dedicated - 1 hour total play time (3600 seconds)
-        if not self.is_unlocked('dedicated'):
-            total_time = stats_manager.get('global', 'total_play_time', 0)
+        if not self.is_unlocked("dedicated"):
+            total_time = stats_manager.get("global", "total_play_time", 0)
             if total_time >= 3600:
-                self.unlock('dedicated')
+                self.unlock("dedicated")
 
 
 # Singleton instance

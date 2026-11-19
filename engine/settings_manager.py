@@ -1,129 +1,85 @@
-"""
-Settings Manager - Persistent settings for WES.
+"""Validated user preferences, saved atomically in the user data directory."""
 
-Manages user preferences like audio volume, mute state, and fullscreen mode.
-Settings are stored in a JSON file and loaded on startup.
-"""
-
-import json
-import os
-from typing import Any, Dict, Optional
+import math
+from engine.persistence import JsonStore, data_path, is_demo
 
 
 class SettingsManager:
-    """Manages user settings with JSON persistence.
-
-    Settings are stored in a JSON file and include:
-    - audio_volume: 0-100 (default 100)
-    - muted: bool (default False)
-    - fullscreen: bool (default False)
-
-    Usage:
-        from engine import get_settings_manager
-
-        settings = get_settings_manager()
-        volume = settings.get('audio_volume', 100)
-        settings.set('muted', True)
-    """
-
-    DEFAULT_FILE = 'settings.json'
-
-    # Default settings values
+    DEFAULT_FILE = "settings.json"
     DEFAULTS = {
-        'audio_volume': 100,
-        'muted': False,
-        'fullscreen': False,
+        "audio_volume": 100,
+        "music_volume": 35,
+        "effects_volume": 85,
+        "muted": False,
+        "fullscreen": False,
+        "display_index": 0,
+        "screen_fit": "aspect",
     }
 
-    def __init__(self, filepath: Optional[str] = None):
-        """Initialize the settings manager.
-
-        Args:
-            filepath: Path to the settings JSON file. If None, uses default
-                     location in the project root directory.
-        """
-        if filepath is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            filepath = os.path.join(base_dir, self.DEFAULT_FILE)
-
-        self._filepath = filepath
-        self._settings: Dict[str, Any] = {}
-        self._load()
-
-    def _load(self) -> None:
-        """Load settings from the JSON file."""
-        # Start with defaults
+    def __init__(self, filepath=None):
+        self._filepath = str(data_path(self.DEFAULT_FILE) if filepath is None else filepath)
+        self._store = JsonStore(
+            self._filepath, legacy_name=self.DEFAULT_FILE if filepath is None else None
+        )
         self._settings = self.DEFAULTS.copy()
+        self._settings.update(self._validated(self._store.load()))
 
-        try:
-            if os.path.exists(self._filepath):
-                with open(self._filepath, 'r') as f:
-                    data = json.load(f)
-                    # Merge loaded settings over defaults
-                    self._settings.update(data)
-        except (json.JSONDecodeError, ValueError, IOError):
-            # If file is corrupted or unreadable, use defaults
-            pass
+    def _validated(self, values):
+        result = {}
+        for key, value in values.items():
+            if key in ("muted", "fullscreen"):
+                if isinstance(value, bool):
+                    result[key] = value
+            elif key in ("audio_volume", "music_volume", "effects_volume"):
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                ):
+                    result[key] = max(0, min(100, int(value)))
+            elif key == "display_index":
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    result[key] = value
+            elif key == "screen_fit":
+                if value in ("aspect", "fill"):
+                    result[key] = value
+            else:
+                result[key] = value
+        return result
 
-    def _save(self) -> None:
-        """Save settings to the JSON file."""
-        try:
-            with open(self._filepath, 'w') as f:
-                json.dump(self._settings, f, indent=2)
-        except IOError:
-            # Silently fail if we can't write
-            pass
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get a setting value.
-
-        Args:
-            key: The setting key.
-            default: Default value if key doesn't exist.
-
-        Returns:
-            The setting value, or default if not found.
-        """
+    def get(self, key, default=None):
         return self._settings.get(key, default)
 
-    def set(self, key: str, value: Any) -> None:
-        """Set a setting value and save.
+    def set(self, key, value, *, persist=True):
+        self.update({key: value}, persist=persist)
 
-        Args:
-            key: The setting key.
-            value: The value to set.
-        """
-        self._settings[key] = value
-        self._save()
+    def update(self, values, *, persist=True):
+        if is_demo():
+            return
+        validated = self._validated(values)
+        if any(self._settings.get(k) != v for k, v in validated.items()):
+            self._settings.update(validated)
+            if persist:
+                self.save()
 
-    def get_all(self) -> Dict[str, Any]:
-        """Get all settings.
-
-        Returns:
-            A copy of all current settings.
-        """
+    def get_all(self):
         return self._settings.copy()
 
-    def reset_to_defaults(self) -> None:
-        """Reset all settings to defaults."""
-        self._settings = self.DEFAULTS.copy()
-        self._save()
+    def reset_to_defaults(self):
+        if not is_demo():
+            self._settings = self.DEFAULTS.copy()
+            self.save()
 
-    def save(self) -> None:
-        """Explicitly save settings to disk."""
-        self._save()
+    def save(self):
+        return self._store.save(self._settings)
 
-
-# Singleton instance
-_settings_manager: Optional[SettingsManager] = None
+    _save = save
 
 
-def get_settings_manager() -> SettingsManager:
-    """Get the global SettingsManager instance.
+_settings_manager = None
 
-    Returns:
-        The singleton SettingsManager instance.
-    """
+
+def get_settings_manager():
     global _settings_manager
     if _settings_manager is None:
         _settings_manager = SettingsManager()

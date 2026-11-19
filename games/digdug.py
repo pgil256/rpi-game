@@ -1,5 +1,5 @@
 """
-Ferret Digger (Dig Dug) - A Weasel Entertainment System Game
+Crystal Quest - A Winston Entertainment System Game
 
 The MOST thematically appropriate game for a ferret - they literally dig!
 Navigate underground tunnels, collect crystals, and avoid enemies.
@@ -13,33 +13,26 @@ This game uses the AnimatedFerret sprite with proper animations:
 Features:
 - Procedurally generated underground dirt that the ferret digs through
 - Trail of tunnels left behind as the ferret moves
-- 3 crystals to collect to win
-- 2 roaming enemies to avoid
+- Three depths with increasing crystal targets
+- Tunnel-bound enemies and three lives
 - Boulder obstacles that block movement
 """
 
 import pygame
+from engine.asset_loader import gem_sprite
 import random
-import sys
 
 from engine import (
     BaseGame,
     AnimatedFerret,
-    AssetLoader,
     AudioManager,
     Difficulty,
     get_score_manager,
     get_stats_manager,
     WINDOW_WIDTH,
     WINDOW_HEIGHT,
-    BLACK,
     WHITE,
-    RED,
     GREEN,
-    CYAN,
-    BURROW_BROWN,
-    WEASEL_BROWN,
-    WEASEL_TAN,
 )
 
 
@@ -49,15 +42,15 @@ GRID_COLS = WINDOW_WIDTH // CELL_SIZE
 GRID_ROWS = WINDOW_HEIGHT // CELL_SIZE
 
 # Enhanced cute underground theme colors
-DIRT_DARK = (80, 55, 35)       # Softer dark brown
-DIRT_MID = (120, 85, 55)       # Warmer medium brown
-DIRT_LIGHT = (180, 145, 100)   # Softer light brown
-DIRT_ACCENT = (100, 70, 45)    # Accent color for depth
-TUNNEL_COLOR = (40, 30, 25)    # Deep tunnel color
-TUNNEL_GLOW = (60, 45, 35)     # Subtle tunnel edge glow
-ROCK_COLOR = (100, 95, 105)    # Slightly purple-gray rocks
+DIRT_DARK = (80, 55, 35)  # Softer dark brown
+DIRT_MID = (120, 85, 55)  # Warmer medium brown
+DIRT_LIGHT = (180, 145, 100)  # Softer light brown
+DIRT_ACCENT = (100, 70, 45)  # Accent color for depth
+TUNNEL_COLOR = (40, 30, 25)  # Deep tunnel color
+TUNNEL_GLOW = (60, 45, 35)  # Subtle tunnel edge glow
+ROCK_COLOR = (100, 95, 105)  # Slightly purple-gray rocks
 ROCK_HIGHLIGHT = (130, 125, 135)  # Rock highlights
-CRYSTAL_GLOW = (180, 240, 255) # Softer cyan glow
+CRYSTAL_GLOW = (180, 240, 255)  # Softer cyan glow
 CRYSTAL_SPARKLE = (255, 255, 220)  # Crystal sparkle
 GEM_COLORS = [
     (180, 240, 255),  # Cyan
@@ -72,7 +65,8 @@ DUST_COLOR = (160, 130, 100)
 import math
 
 # Entity sizes
-ENTITY_SIZE = 50
+ENTITY_SIZE = 32
+PLAYER_HITBOX = 28
 PLAYER_SPEED = 4
 
 
@@ -96,39 +90,29 @@ class Crystal(pygame.sprite.Sprite):
         """Update crystal animation (subtle glow effect)."""
         self.glow_timer += 1
 
+    _glow_frames = None
+
     def draw(self, surface):
-        """Draw the crystal with enhanced glow and sparkle effects."""
-        cx, cy = self.rect.centerx, self.rect.centery
-
-        # Draw outer glow (pulsing)
-        pulse = abs(math.sin(self.glow_timer * 0.08)) * 0.5 + 0.5
-        glow_size = int(35 + pulse * 10)
-        glow_alpha = int(60 + pulse * 40)
-        glow_surf = pygame.Surface((glow_size * 2, glow_size * 2), pygame.SRCALPHA)
-        pygame.draw.circle(glow_surf, (*CRYSTAL_GLOW, glow_alpha), (glow_size, glow_size), glow_size)
-        surface.blit(glow_surf, (cx - glow_size, cy - glow_size))
-
-        # Draw inner brighter glow
-        inner_size = int(20 + pulse * 5)
-        inner_surf = pygame.Surface((inner_size * 2, inner_size * 2), pygame.SRCALPHA)
-        pygame.draw.circle(inner_surf, (*CRYSTAL_SPARKLE, int(80 + pulse * 40)), (inner_size, inner_size), inner_size)
-        surface.blit(inner_surf, (cx - inner_size, cy - inner_size))
-
-        # Draw sparkles
+        """Reuse a bounded glow animation instead of allocating every frame."""
+        if Crystal._glow_frames is None:
+            Crystal._glow_frames = []
+            for frame in range(24):
+                pulse = abs(math.sin(frame * math.pi / 24))
+                glow = pygame.Surface((90, 90), pygame.SRCALPHA)
+                pygame.draw.circle(
+                    glow, (*CRYSTAL_GLOW, int(60 + pulse * 40)), (45, 45), int(35 + pulse * 10)
+                )
+                pygame.draw.circle(glow, (*CRYSTAL_SPARKLE, 100), (45, 45), 23)
+                Crystal._glow_frames.append(glow)
+        surface.blit(
+            Crystal._glow_frames[(self.glow_timer // 2) % 24],
+            (self.rect.centerx - 45, self.rect.centery - 45),
+        )
         for sx, sy, phase in self._sparkles:
-            sparkle_val = abs(math.sin(self.glow_timer * 0.12 + phase))
-            if sparkle_val > 0.6:
-                spark_size = int(2 + sparkle_val * 3)
-                spark_alpha = int((sparkle_val - 0.6) * 2.5 * 255)
-                spark_surf = pygame.Surface((spark_size * 2 + 2, spark_size * 2 + 2), pygame.SRCALPHA)
-                # Draw 4-pointed star
-                pygame.draw.line(spark_surf, (*CRYSTAL_SPARKLE, spark_alpha),
-                               (0, spark_size), (spark_size * 2, spark_size), 2)
-                pygame.draw.line(spark_surf, (*CRYSTAL_SPARKLE, spark_alpha),
-                               (spark_size, 0), (spark_size, spark_size * 2), 2)
-                surface.blit(spark_surf, (cx + sx - spark_size, cy + sy - spark_size))
-
-        # Draw the crystal image
+            if abs(math.sin(self.glow_timer * 0.12 + phase)) > 0.7:
+                x, y = self.rect.centerx + sx, self.rect.centery + sy
+                pygame.draw.line(surface, CRYSTAL_SPARKLE, (x - 3, y), (x + 3, y), 2)
+                pygame.draw.line(surface, CRYSTAL_SPARKLE, (x, y - 3), (x, y + 3), 2)
         surface.blit(self.image, self.rect)
 
 
@@ -156,24 +140,45 @@ class Enemy(pygame.sprite.Sprite):
         self.dy = 0
         self.change_timer = 0
 
-    def update(self, bounds_top=100):
-        """Update enemy movement with random direction changes."""
+    def update(self, terrain=None, boulders=(), bounds_top=100, speed=2):
+        """Patrol excavated cells; dirt and boulders block enemy movement."""
         self.change_timer += 1
-
-        # Move
-        self.rect.x += self.dx
-        self.rect.y += self.dy
-
-        # Bounce off edges
-        if self.rect.left < 0 or self.rect.right > WINDOW_WIDTH:
-            self.dx = -self.dx
-        if self.rect.top < bounds_top or self.rect.bottom > WINDOW_HEIGHT:
-            self.dy = -self.dy
-
-        # Random direction changes
-        if random.random() < 0.02:
-            directions = [(-2, 0), (2, 0), (0, -2), (0, 2)]
-            self.dx, self.dy = random.choice(directions)
+        directions = [(-speed, 0), (speed, 0), (0, -speed), (0, speed)]
+        current = (
+            (int(math.copysign(speed, self.dx)), 0)
+            if self.dx
+            else (0, int(math.copysign(speed, self.dy or 1)))
+        )
+        if self.change_timer % 45 == 0:
+            random.shuffle(directions)
+        else:
+            directions = [current] + [d for d in directions if d != current]
+        for dx, dy in directions:
+            candidate = self.rect.move(dx, dy)
+            if (
+                candidate.left < 0
+                or candidate.right > WINDOW_WIDTH
+                or candidate.top < bounds_top
+                or candidate.bottom > WINDOW_HEIGHT
+            ):
+                continue
+            if any(candidate.colliderect(b.rect) for b in boulders):
+                continue
+            if terrain is not None:
+                cells = (
+                    (row, col)
+                    for row in range(
+                        candidate.top // CELL_SIZE, (candidate.bottom - 1) // CELL_SIZE + 1
+                    )
+                    for col in range(
+                        candidate.left // CELL_SIZE, (candidate.right - 1) // CELL_SIZE + 1
+                    )
+                )
+                if any(terrain[row][col] for row, col in cells):
+                    continue
+            self.rect = candidate
+            self.dx, self.dy = dx, dy
+            return
 
     def draw(self, surface):
         """Draw the enemy."""
@@ -187,101 +192,53 @@ class DigDugGame(BaseGame):
     - D-pad/Arrow keys: Move the ferret (continuous digging movement)
     - B/ESC: Return to menu
 
-    The ferret digs through dirt, leaving tunnels behind. Collect all 3
-    crystals while avoiding enemies and boulders to win!
+    Dig routes through three depths, collecting each crystal target while
+    avoiding tunnel-bound enemies and boulders. Three lives per expedition.
     """
 
     # Difficulty presets
     DIFFICULTY_PRESETS = {
         Difficulty.EASY: {
-            'enemy_count': 1,   # Just 1 enemy
+            "enemy_count": 1,  # Just 1 enemy
         },
         Difficulty.NORMAL: {
-            'enemy_count': 2,   # 2 enemies (default)
+            "enemy_count": 2,  # 2 enemies (default)
         },
         Difficulty.HARD: {
-            'enemy_count': 4,   # 4 enemies
+            "enemy_count": 4,  # 4 enemies
         },
     }
 
     def setup(self):
-        """Initialize the game state."""
-        # Apply difficulty settings
-        preset = self.DIFFICULTY_PRESETS[self.difficulty]
-        self.enemy_count = preset['enemy_count']
-
-        self.font = pygame.font.Font(None, 36)
-
-        # Create asset loader
-        self.asset_loader = AssetLoader()
-
-        # Load sprites
+        """Prepare reusable artwork, then start a fresh expedition."""
+        self.font = pygame.font.Font(None, 30)
         self._load_sprites()
-
-        # Create the terrain grid (True = dirt, False = tunnel)
-        self._create_terrain()
-
-        # Create the animated ferret player
-        self.ferret = AnimatedFerret(
-            x=200,
-            y=200,
-            scale=2,  # Slightly larger for visibility
-            speed=0,  # We handle position directly for collision
-            frame_delay=4  # Fast animation for digging
-        )
-        self.ferret.set_state('dig')
-
-        # Player position (center of sprite)
-        self.player_x = 200.0
-        self.player_y = 200.0
-
-        # Movement state
-        self.moving = False
-        self.last_dx = 0
-        self.last_dy = 0
-
-        # Create game entities
-        self._create_entities()
-
-        # Game state
-        self.crystals_collected = 0
-        self.game_over = False
-        self.won = False
-        self.paused = False
         self.score_manager = get_score_manager()
         self.stats = get_stats_manager()
-        # Dig Dug uses crystals as score
-        self.high_score = self.score_manager.get_high_score('digdug')
-        self.new_high_score = False
-        self._deaths = 0  # Track for stats
-
-        # Dig out starting area around the player
-        self._dig_tunnel(int(self.player_x), int(self.player_y), radius=40)
+        self.high_score = self.score_manager.get_high_score("digdug", difficulty=self.difficulty)
+        self.ferret = AnimatedFerret(x=200, y=200, scale=1, speed=0, frame_delay=4)
+        self.ferret.set_sprite_size(32)
+        self._hud_surface = pygame.Surface((WINDOW_WIDTH, 40), pygame.SRCALPHA)
+        for y in range(40):
+            pygame.draw.line(
+                self._hud_surface, (30, 25, 20, 180 - y * 2), (0, y), (WINDOW_WIDTH, y)
+            )
+        self._reset_game(count_session=False)
 
     def _load_sprites(self):
         """Load game sprites with fallbacks."""
-        # Crystal (soupbowl)
-        self.crystal_img = self.asset_loader.load_image('soupbowl.png', (ENTITY_SIZE, ENTITY_SIZE))
-        if not self.crystal_img:
-            self.crystal_img = self._create_fallback_sprite(ENTITY_SIZE, CYAN)
+        self.crystal_img = gem_sprite(ENTITY_SIZE)
 
-        # Enemy (soupcan_new with translucency) - preserve aspect ratio
-        self.enemy_img = self.asset_loader.load_image('soupcan_new.png', (ENTITY_SIZE, ENTITY_SIZE), preserve_aspect=True)
-        if not self.enemy_img:
-            self.enemy_img = self._create_fallback_sprite(ENTITY_SIZE, RED)
-        else:
-            # Apply translucency to match other game sprites
-            self.enemy_img = self.enemy_img.convert_alpha()
-            self.enemy_img.set_alpha(200)
+        # Original underground beetle, rendered procedurally.
+        self.enemy_img = pygame.Surface((28, 28), pygame.SRCALPHA)
+        pygame.draw.ellipse(self.enemy_img, (180, 90, 125), (2, 3, 24, 22))
+        pygame.draw.line(self.enemy_img, (90, 40, 65), (14, 5), (14, 24), 2)
+        for x in (9, 19):
+            pygame.draw.circle(self.enemy_img, WHITE, (x, 8), 4)
+            pygame.draw.circle(self.enemy_img, (35, 25, 40), (x, 8), 2)
 
         # Boulder
         self.boulder_img = self._create_boulder_sprite()
-
-    def _create_fallback_sprite(self, size, color):
-        """Create a simple colored fallback sprite."""
-        surface = pygame.Surface((size, size), pygame.SRCALPHA)
-        pygame.draw.ellipse(surface, color, (0, 0, size, size))
-        return surface.convert_alpha()  # Convert for optimal blitting
 
     def _create_boulder_sprite(self):
         """Create a boulder sprite with rocky texture."""
@@ -299,6 +256,8 @@ class DigDugGame(BaseGame):
 
     def _create_terrain(self):
         """Create the underground terrain grid."""
+        self._terrain_dirty = {(r, c) for r in range(GRID_ROWS) for c in range(GRID_COLS)}
+        self._terrain_surface = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT)).convert()
         self.terrain = [[True for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 
         # Create some random dirt texture variations for visual interest
@@ -314,227 +273,226 @@ class DigDugGame(BaseGame):
             self.dirt_texture.append(row_data)
 
     def _create_entities(self):
-        """Create crystals, enemies, and boulders."""
-        # Crystals (placed randomly in lower portion of screen)
+        """Place separated objectives/hazards with new layouts at each depth."""
         self.crystals = pygame.sprite.Group()
-        crystal_positions = [
-            (100, 300),
-            (400, 400),
-            (600, 350),
-        ]
-        for x, y in crystal_positions:
-            crystal = Crystal(x, y, self.crystal_img)
-            self.crystals.add(crystal)
-            # Dig out area around crystal
-            self._dig_tunnel(x + ENTITY_SIZE // 2, y + ENTITY_SIZE // 2, radius=30)
-
-        # Boulders (obstacles)
         self.boulders = pygame.sprite.Group()
-        boulder_positions = [
-            (500, 200),
-            (300, 350),
-            (200, 450),
-        ]
-        for x, y in boulder_positions:
-            boulder = Boulder(x, y, self.boulder_img)
-            self.boulders.add(boulder)
-
-        # Enemies - difficulty-based count
         self.enemies = pygame.sprite.Group()
-        # Pool of possible enemy spawn positions
-        all_enemy_positions = [
-            (400, 300),
-            (600, 400),
-            (150, 450),
-            (500, 200),
-        ]
-        # Use the first N positions based on difficulty
-        for i in range(min(self.enemy_count, len(all_enemy_positions))):
-            x, y = all_enemy_positions[i]
-            enemy = Enemy(x, y, self.enemy_img)
-            self.enemies.add(enemy)
-            # Dig out area around enemy start
-            self._dig_tunnel(x + ENTITY_SIZE // 2, y + ENTITY_SIZE // 2, radius=30)
+        cells = [(x, y) for y in range(275, 526, 75) for x in range(75, 726, 75)]
+        random.shuffle(cells)
+        occupied = [pygame.Rect(160, 160, 80, 80)]
+
+        def position():
+            while cells:
+                x, y = cells.pop()
+                rect = pygame.Rect(x, y, ENTITY_SIZE, ENTITY_SIZE)
+                if not any(rect.inflate(30, 30).colliderect(other) for other in occupied):
+                    occupied.append(rect)
+                    return x, y
+            raise RuntimeError("No safe entity spawn positions remain")
+
+        for _ in range(3 + self.level):
+            x, y = position()
+            self.boulders.add(Boulder(x, y, self.boulder_img))
+        for _ in range(self.crystals_needed):
+            x, y = position()
+            self.crystals.add(Crystal(x, y, self.crystal_img))
+            self._dig_tunnel(x + ENTITY_SIZE // 2, y + ENTITY_SIZE // 2, radius=35)
+        for _ in range(self.enemy_count):
+            x, y = position()
+            self.enemies.add(Enemy(x, y, self.enemy_img))
+            # Each beetle starts in a small burrow. Digging connects these patrol
+            # areas to the player's tunnels, so routes change the encounter.
+            for tunnel_x in range(max(25, x - 75), min(WINDOW_WIDTH - 25, x + 76), 20):
+                self._dig_tunnel(tunnel_x, y + 14, radius=35)
 
     def _dig_tunnel(self, x, y, radius=20):
         """Dig out a circular area in the terrain."""
         center_col = x // CELL_SIZE
         center_row = y // CELL_SIZE
         cells_radius = radius // CELL_SIZE + 1
+        cleared = False
 
-        for row in range(max(0, center_row - cells_radius),
-                         min(GRID_ROWS, center_row + cells_radius + 1)):
-            for col in range(max(0, center_col - cells_radius),
-                             min(GRID_COLS, center_col + cells_radius + 1)):
+        for row in range(
+            max(0, center_row - cells_radius), min(GRID_ROWS, center_row + cells_radius + 1)
+        ):
+            for col in range(
+                max(0, center_col - cells_radius), min(GRID_COLS, center_col + cells_radius + 1)
+            ):
                 # Check if within circular radius
                 dx = (col * CELL_SIZE + CELL_SIZE // 2) - x
                 dy = (row * CELL_SIZE + CELL_SIZE // 2) - y
                 if dx * dx + dy * dy <= radius * radius:
-                    self.terrain[row][col] = False
+                    if self.terrain[row][col]:
+                        cleared = True
+                        self.terrain[row][col] = False
+                        self._terrain_dirty.add((row, col))
+                        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                            if 0 <= row + dr < GRID_ROWS and 0 <= col + dc < GRID_COLS:
+                                self._terrain_dirty.add((row + dr, col + dc))
+        return cleared
 
-    def _reset_game(self):
-        """Reset the game to initial state."""
-        self.crystals_collected = 0
+    def _reset_game(self, count_session=True):
+        if count_session:
+            self.restart_session()
+        self.score = 0
+        self.level = 1
+        self.max_levels = 3
+        self.lives = 3
+        self.new_high_score = False
+        self._deaths = 0
+        self._total_crystals = 0
+        self._session_recorded = False
         self.game_over = False
         self.won = False
+        self.paused = False
+        self._start_level()
 
-        # Reset player position
+    def _start_level(self):
+        self.crystals_needed = 2 + self.level
+        self.crystals_collected = 0
+        self.enemy_count = min(
+            8, self.DIFFICULTY_PRESETS[self.difficulty]["enemy_count"] + self.level - 1
+        )
+        self.level_complete = False
+        self.transition_timer = 0
+        self.death_timer = 0
+        self.special_timer = 40
+        self.invulnerable_timer = 90
         self.player_x = 200.0
         self.player_y = 200.0
-        self.ferret.set_state('dig')
-
-        # Recreate terrain and entities
+        self.last_dx = self.last_dy = 0
+        self.moving = False
         self._create_terrain()
         self._create_entities()
-        self._dig_tunnel(int(self.player_x), int(self.player_y), radius=40)
+        self._dig_tunnel(200, 200, radius=40)
+        self.ferret.set_position(200, 200)
+        self.ferret.set_state("emerge")
 
     def handle_input(self):
-        """Process player input. Returns True to exit to menu."""
         self.input_manager.update()
-
-        # Check for back button to return to menu
         if self.input_manager.back_pressed():
             return True
-
-        # If game is over, wait for action button to restart
         if self.game_over or self.won:
-            if self.input_manager.action_pressed():
+            if self.death_timer == 0 and self.input_manager.action_pressed():
                 self._reset_game()
             return False
-
-        # Check for pause toggle
-        if self.input_manager.pause_pressed():
+        if self.input_manager.pause_pressed() and self.death_timer == 0:
             self.paused = not self.paused
-            return False
-
-        # Don't process input when paused
-        if self.paused:
-            return False
-
-        # Get D-pad input for continuous movement
-        dp = self.input_manager.get_dpad()
-
-        # Also check keyboard for continuous movement
-        keys = pygame.key.get_pressed()
-        dx = dp[0] if dp[0] != 0 else (keys[pygame.K_RIGHT] - keys[pygame.K_LEFT])
-        dy = dp[1] if dp[1] != 0 else (keys[pygame.K_DOWN] - keys[pygame.K_UP])
-
-        self.last_dx = dx
-        self.last_dy = dy
-        self.moving = (dx != 0 or dy != 0)
-
+        self.last_dx, self.last_dy = self.input_manager.get_dpad()
+        self.moving = bool(self.last_dx or self.last_dy)
         return False
 
-    def update(self, dt):
-        """Update game logic."""
-        if self.game_over or self.won or self.paused:
+    def _finish_session(self):
+        if self._session_recorded:
             return
+        self._session_recorded = True
+        if self.score_manager.set_high_score("digdug", self.score, difficulty=self.difficulty):
+            self.new_high_score = True
+            self.high_score = self.score
+        self._finalize_game_statistics()
+        if self.won:
+            self._record_campaign_clear()
+            self.achievements.unlock("digdug_win")
+            if self.difficulty == Difficulty.HARD:
+                self.achievements.unlock("digdug_hard")
 
-        # Update player position based on input
-        if self.moving:
-            new_x = self.player_x + self.last_dx * PLAYER_SPEED
-            new_y = self.player_y + self.last_dy * PLAYER_SPEED
+    def _record_game_statistics(self):
+        self.stats.increment("digdug", "crystals_collected", self._total_crystals)
+        self.stats.increment("digdug", "deaths", self._deaths)
+        self.stats.add("digdug", "total_score", self.score)
+        if self.won:
+            self.stats.increment("digdug", "wins")
 
-            # Clamp to screen bounds
-            new_x = max(ENTITY_SIZE // 2, min(WINDOW_WIDTH - ENTITY_SIZE // 2, new_x))
-            new_y = max(100 + ENTITY_SIZE // 2, min(WINDOW_HEIGHT - ENTITY_SIZE // 2, new_y))
-
-            # Check boulder collisions
-            player_rect = pygame.Rect(
-                new_x - ENTITY_SIZE // 2,
-                new_y - ENTITY_SIZE // 2,
-                ENTITY_SIZE,
-                ENTITY_SIZE
-            )
-
-            collision = False
-            for boulder in self.boulders:
-                if player_rect.colliderect(boulder.rect):
-                    collision = True
-                    break
-
-            if not collision:
-                self.player_x = new_x
-                self.player_y = new_y
-
-                # Dig tunnel as we move
-                self._dig_tunnel(int(self.player_x), int(self.player_y), radius=20)
-
-                # Update ferret state and facing
-                if self.last_dx > 0:
-                    self.ferret.facing_right = True
-                elif self.last_dx < 0:
-                    self.ferret.facing_right = False
-
-                self.ferret.set_state('dig', reset_frame=False)
-        else:
-            # Idle when not moving
-            self.ferret.set_state('idle', reset_frame=False)
-
-        # Update ferret position
-        self.ferret.x = self.player_x
-        self.ferret.y = self.player_y
-        self.ferret.update(0, 0)  # Update animation
-
-        # Update crystals
-        for crystal in self.crystals:
-            crystal.update()
-
-        # Check crystal collection
-        player_rect = self.ferret.get_rect()
-        collected = pygame.sprite.spritecollide(
-            type('', (), {'rect': player_rect})(),
-            self.crystals,
-            True
+    def _player_rect(self, x=None, y=None):
+        x = self.player_x if x is None else x
+        y = self.player_y if y is None else y
+        return pygame.Rect(
+            int(x - PLAYER_HITBOX / 2), int(y - PLAYER_HITBOX / 2), PLAYER_HITBOX, PLAYER_HITBOX
         )
+
+    def update(self, dt):
+        if self.paused:
+            return
+        if self.death_timer:
+            self.ferret.update(0, 0)
+            self.death_timer -= 1
+            if not self.death_timer and not self.game_over:
+                self.player_x = self.player_y = 200.0
+                self.ferret.set_position(200, 200)
+                self.ferret.set_state("emerge")
+                self.special_timer = 40
+                self.invulnerable_timer = 120
+            return
+        if self.game_over or self.won:
+            return
+        if self.level_complete:
+            self.transition_timer -= 1
+            self.ferret.update(0, 0)
+            if self.transition_timer <= 0:
+                self.level += 1
+                self._start_level()
+            return
+        self.invulnerable_timer = max(0, self.invulnerable_timer - 1)
+        self.special_timer = max(0, self.special_timer - 1)
+        dx, dy = self.last_dx, self.last_dy
+        length = math.hypot(dx, dy)
+        if length:
+            dx, dy = dx / length * PLAYER_SPEED, dy / length * PLAYER_SPEED
+            new_x = max(16, min(WINDOW_WIDTH - 16, self.player_x + dx))
+            if not any(
+                self._player_rect(new_x, self.player_y).colliderect(b.rect) for b in self.boulders
+            ):
+                self.player_x = new_x
+            new_y = max(116, min(WINDOW_HEIGHT - 16, self.player_y + dy))
+            if not any(
+                self._player_rect(self.player_x, new_y).colliderect(b.rect) for b in self.boulders
+            ):
+                self.player_y = new_y
+            if self._dig_tunnel(int(self.player_x), int(self.player_y), radius=30):
+                self.audio.play_sound(AudioManager.SOUND_DIG)
+            if dx:
+                self.ferret.facing_right = dx > 0
+        if not self.special_timer:
+            self.ferret.set_state("dig" if length else "idle", reset_frame=False)
+        self.ferret.set_position(self.player_x, self.player_y)
+        self.ferret.update(0, 0)
+        self.crystals.update()
+        player_rect = self._player_rect()
+        collected = [c for c in self.crystals if player_rect.colliderect(c.rect)]
+        for crystal in collected:
+            crystal.kill()
         if collected:
             self.crystals_collected += len(collected)
+            self._total_crystals += len(collected)
+            self.score += 100 * len(collected)
+            self.ferret.set_state("emerge")
+            self.special_timer = 40
             self.audio.play_sound(AudioManager.SOUND_COLLECT)
-            # Play emerge animation briefly when collecting
-            self.ferret.set_state('emerge')
-            # Achievement for first crystal
-            self.achievements.unlock('digdug_first')
-
-            if self.crystals_collected >= 3:
-                # Check and save high score
-                if self.score_manager.set_high_score('digdug', self.crystals_collected):
-                    self.new_high_score = True
-                    self.high_score = self.crystals_collected
-                # Track statistics
-                self.stats.increment('digdug', 'games_played')
-                self.stats.increment('digdug', 'crystals_collected', self.crystals_collected)
-                self.stats.increment('digdug', 'wins')
-                self.stats.increment('digdug', 'deaths', self._deaths)
-                self.stats.increment('global', 'games_started')
-                self.stats.increment('global', 'games_completed')
-                self.won = True
+            self.achievements.unlock("digdug_first")
+            if not self.crystals:
+                self.score += 500 * self.level
+                self.stats.increment("global", "games_completed")
                 self.audio.play_sound(AudioManager.SOUND_VICTORY)
-                # Achievements for winning
-                self.achievements.unlock('digdug_win')
-                if self.difficulty == Difficulty.HARD:
-                    self.achievements.unlock('digdug_hard')
-
-        # Update enemies
+                if self.level == self.max_levels:
+                    self.won = True
+                    self._finish_session()
+                else:
+                    self.level_complete = True
+                    self.transition_timer = 90
+                return
         for enemy in self.enemies:
-            enemy.update(bounds_top=100)
-
-        # Check enemy collision
-        for enemy in self.enemies:
-            if player_rect.colliderect(enemy.rect):
-                self.ferret.set_state('death')
-                self._deaths += 1
-                # Check and save high score (crystals as score)
-                if self.score_manager.set_high_score('digdug', self.crystals_collected):
-                    self.new_high_score = True
-                    self.high_score = self.crystals_collected
-                # Track statistics
-                self.stats.increment('digdug', 'games_played')
-                self.stats.increment('digdug', 'crystals_collected', self.crystals_collected)
-                self.stats.increment('digdug', 'deaths', self._deaths)
-                self.stats.increment('global', 'games_started')
+            enemy.update(self.terrain, self.boulders, speed=min(4, 1 + self.level))
+        if not self.invulnerable_timer and any(
+            player_rect.colliderect(e.rect) for e in self.enemies
+        ):
+            self.lives -= 1
+            self._deaths += 1
+            self.death_timer = 60
+            self.ferret.set_state("death")
+            self.audio.play_sound(AudioManager.SOUND_DEATH)
+            if self.lives == 0:
                 self.game_over = True
-                self.audio.play_sound(AudioManager.SOUND_DEATH)
-                break
+                self._finish_session()
 
     def render(self):
         """Draw the game state to the screen."""
@@ -559,107 +517,58 @@ class DigDugGame(BaseGame):
         # Draw HUD
         self._draw_hud()
 
-        # Draw game over / win / pause overlays
         if self.paused:
             self._draw_pause_overlay()
-        elif self.game_over:
-            if self.new_high_score:
-                self._draw_overlay("NEW HIGH SCORE! GAME OVER - Press A", (255, 215, 0))
-            else:
-                self._draw_overlay("GAME OVER - Press A", RED)
+        elif self.game_over and self.death_timer == 0:
+            self._draw_game_over_overlay(score=self.score)
         elif self.won:
-            if self.new_high_score:
-                self._draw_overlay("NEW HIGH SCORE! YOU WIN! - Press A", (255, 215, 0))
-            else:
-                self._draw_overlay("YOU WIN! - Press A", GREEN)
+            self._overlay(
+                "EXPEDITION COMPLETE!",
+                self._campaign_result(),
+                "A / Enter: restart    B / Esc: menu",
+            )
+        elif self.level_complete:
+            self._draw_overlay(f"Depth {self.level} cleared! Heading deeper...", GREEN)
 
     def _draw_terrain(self):
-        """Draw the underground terrain with tunnels and enhanced visuals."""
-        # Fill with gradient-like base (darker at bottom for depth)
-        self.screen.fill(DIRT_DARK)
-
-        # Draw subtle depth gradient
-        for y_band in range(0, WINDOW_HEIGHT, 50):
-            band_alpha = int(15 + (y_band / WINDOW_HEIGHT) * 20)
-            band_surf = pygame.Surface((WINDOW_WIDTH, 50), pygame.SRCALPHA)
-            band_surf.fill((0, 0, 0, band_alpha))
-            self.screen.blit(band_surf, (0, y_band))
-
-        # Draw each cell
-        for row in range(GRID_ROWS):
-            for col in range(GRID_COLS):
-                x = col * CELL_SIZE
-                y = row * CELL_SIZE
-
-                if self.terrain[row][col]:
-                    # Dirt - draw with texture
-                    shade, has_rock = self.dirt_texture[row][col]
-                    pygame.draw.rect(self.screen, shade, (x, y, CELL_SIZE, CELL_SIZE))
-
-                    # Add subtle texture pattern
-                    pygame.draw.line(self.screen, DIRT_ACCENT, (x, y), (x + CELL_SIZE, y), 1)
-                    pygame.draw.line(self.screen, DIRT_ACCENT, (x, y), (x, y + CELL_SIZE), 1)
-
-                    # Small rock specs with highlight
-                    if has_rock:
-                        pygame.draw.circle(self.screen, ROCK_COLOR,
-                            (x + CELL_SIZE // 2, y + CELL_SIZE // 2), 3)
-                        pygame.draw.circle(self.screen, ROCK_HIGHLIGHT,
-                            (x + CELL_SIZE // 2 - 1, y + CELL_SIZE // 2 - 1), 1)
-                else:
-                    # Tunnel - dark excavated area with subtle glow
-                    pygame.draw.rect(self.screen, TUNNEL_COLOR, (x, y, CELL_SIZE, CELL_SIZE))
-
-                    # Draw softer tunnel edges with glow effect
-                    if row > 0 and self.terrain[row - 1][col]:
-                        pygame.draw.line(self.screen, TUNNEL_GLOW, (x, y), (x + CELL_SIZE, y), 3)
-                        pygame.draw.line(self.screen, DIRT_ACCENT, (x, y), (x + CELL_SIZE, y), 1)
-                    if row < GRID_ROWS - 1 and self.terrain[row + 1][col]:
-                        pygame.draw.line(self.screen, TUNNEL_GLOW, (x, y + CELL_SIZE - 1), (x + CELL_SIZE, y + CELL_SIZE - 1), 3)
-                        pygame.draw.line(self.screen, DIRT_ACCENT, (x, y + CELL_SIZE - 1), (x + CELL_SIZE, y + CELL_SIZE - 1), 1)
-                    if col > 0 and self.terrain[row][col - 1]:
-                        pygame.draw.line(self.screen, TUNNEL_GLOW, (x, y), (x, y + CELL_SIZE), 3)
-                        pygame.draw.line(self.screen, DIRT_ACCENT, (x, y), (x, y + CELL_SIZE), 1)
-                    if col < GRID_COLS - 1 and self.terrain[row][col + 1]:
-                        pygame.draw.line(self.screen, TUNNEL_GLOW, (x + CELL_SIZE - 1, y), (x + CELL_SIZE - 1, y + CELL_SIZE), 3)
-                        pygame.draw.line(self.screen, DIRT_ACCENT, (x + CELL_SIZE - 1, y), (x + CELL_SIZE - 1, y + CELL_SIZE), 1)
+        """Only redraw excavated cells and the neighboring tunnel edges."""
+        for row, col in self._terrain_dirty:
+            x, y = col * CELL_SIZE, row * CELL_SIZE
+            rect = (x, y, CELL_SIZE, CELL_SIZE)
+            if self.terrain[row][col]:
+                shade, has_rock = self.dirt_texture[row][col]
+                pygame.draw.rect(self._terrain_surface, shade, rect)
+                pygame.draw.line(self._terrain_surface, DIRT_ACCENT, (x, y), (x + CELL_SIZE, y))
+                pygame.draw.line(self._terrain_surface, DIRT_ACCENT, (x, y), (x, y + CELL_SIZE))
+                if has_rock:
+                    pygame.draw.circle(self._terrain_surface, ROCK_COLOR, (x + 12, y + 12), 3)
+            else:
+                pygame.draw.rect(self._terrain_surface, TUNNEL_COLOR, rect)
+                for dr, dc, start, end in (
+                    (-1, 0, (x, y), (x + 24, y)),
+                    (1, 0, (x, y + 24), (x + 24, y + 24)),
+                    (0, -1, (x, y), (x, y + 24)),
+                    (0, 1, (x + 24, y), (x + 24, y + 24)),
+                ):
+                    if (
+                        0 <= row + dr < GRID_ROWS
+                        and 0 <= col + dc < GRID_COLS
+                        and self.terrain[row + dr][col + dc]
+                    ):
+                        pygame.draw.line(self._terrain_surface, TUNNEL_GLOW, start, end, 3)
+        self._terrain_dirty.clear()
+        self.screen.blit(self._terrain_surface, (0, 0))
 
     def _draw_hud(self):
-        """Draw the heads-up display with cute styling."""
-        # Draw softer HUD bar with gradient
-        hud_surf = pygame.Surface((WINDOW_WIDTH, 40), pygame.SRCALPHA)
-        for y in range(40):
-            alpha = int(180 - y * 2)
-            pygame.draw.line(hud_surf, (30, 25, 20, alpha), (0, y), (WINDOW_WIDTH, y))
-        self.screen.blit(hud_surf, (0, 0))
-
-        # Draw crystal icons instead of text
-        for i in range(3):
-            cx = 15 + i * 35
-            cy = 20
-            if i < self.crystals_collected:
-                # Collected crystal - glowing
-                glow_surf = pygame.Surface((30, 30), pygame.SRCALPHA)
-                pygame.draw.circle(glow_surf, (*CRYSTAL_GLOW, 100), (15, 15), 12)
-                self.screen.blit(glow_surf, (cx - 15, cy - 15))
-                pygame.draw.polygon(self.screen, CRYSTAL_GLOW, [
-                    (cx, cy - 10), (cx + 8, cy), (cx, cy + 10), (cx - 8, cy)])
-            else:
-                # Uncollected - gray outline
-                pygame.draw.polygon(self.screen, (80, 80, 90), [
-                    (cx, cy - 10), (cx + 8, cy), (cx, cy + 10), (cx - 8, cy)], 2)
-
-        # Draw menu hint
-        hint_text = "[B] Menu"
-        shadow_surface = self.font.render(hint_text, True, (20, 15, 10))
-        self.screen.blit(shadow_surface, (WINDOW_WIDTH - 90, 11))
-        text_surface = self.font.render(hint_text, True, (200, 190, 170))
-        self.screen.blit(text_surface, (WINDOW_WIDTH - 91, 10))
+        self.screen.blit(self._hud_surface, (0, 0))
+        text = f"Depth {self.level}/{self.max_levels}  Gems {self.crystals_collected}/{self.crystals_needed}  Score {self.score}  High {self.high_score}  Lives {self.lives}"
+        self.screen.blit(self.font.render(text, True, (225, 215, 195)), (10, 10))
+        self.screen.blit(self.font.render("[B] Menu", True, (225, 215, 195)), (690, 566))
 
     def _draw_overlay(self, message, color):
         """Draw a semi-transparent overlay with a message."""
         # Use cached overlay surface
-        if not hasattr(self, '_overlay_surface'):
+        if not hasattr(self, "_overlay_surface"):
             self._overlay_surface = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
             self._overlay_surface.fill((0, 0, 0, 180))
         self.screen.blit(self._overlay_surface, (0, 0))
@@ -667,14 +576,3 @@ class DigDugGame(BaseGame):
         text_surface = self.font.render(message, True, color)
         text_rect = text_surface.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2))
         self.screen.blit(text_surface, text_rect)
-
-
-def run_digdug(screen, input_manager):
-    """Entry point for the Dig Dug game.
-
-    Args:
-        screen: The pygame display surface.
-        input_manager: The InputManager instance.
-    """
-    game = DigDugGame(screen, input_manager)
-    game.run()

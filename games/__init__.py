@@ -1,5 +1,5 @@
 """
-Games package for the Weasel Entertainment System.
+Games package for the Winston Entertainment System.
 
 This package exports all game classes and their run functions.
 """
@@ -12,10 +12,10 @@ from .digdug import DigDugGame
 from .boulderdash import BoulderDashGame
 
 __all__ = [
-    'SnakeGame',
-    'PacmanGame',
-    'FroggerGame',
-    'CentipedeGame',
-    'DigDugGame',
-    'BoulderDashGame',
+    "SnakeGame",
+    "PacmanGame",
+    "FroggerGame",
+    "CentipedeGame",
+    "DigDugGame",
+    "BoulderDashGame",
 ]

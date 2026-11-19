@@ -1,5 +1,5 @@
 """
-Audio Manager for the Weasel Entertainment System.
+Audio Manager for the Winston Entertainment System.
 
 Provides sound effect and music playback with graceful fallback when audio
 is unavailable. Supports global mute toggle that persists across games.
@@ -29,13 +29,33 @@ class AudioManager:
     """
 
     # Standard sound event names used across all games
-    SOUND_MENU_MOVE = 'menu_move'       # Menu navigation
-    SOUND_MENU_SELECT = 'menu_select'   # Selecting a menu item
-    SOUND_COLLECT = 'collect'           # Collecting items (food, pellets, diamonds)
-    SOUND_DEATH = 'death'               # Player death/hit
-    SOUND_VICTORY = 'victory'           # Level complete or win
-    SOUND_JUMP = 'jump'                 # Jump action (frogger)
-    SOUND_DIG = 'dig'                   # Digging (boulder dash, dig dug)
+    SOUND_MENU_MOVE = "menu_move"  # Menu navigation
+    SOUND_MENU_SELECT = "menu_select"  # Selecting a menu item
+    SOUND_COLLECT = "collect"  # Collecting items (food, pellets, diamonds)
+    SOUND_DEATH = "death"  # Player death/hit
+    SOUND_VICTORY = "victory"  # Level complete or win
+    SOUND_JUMP = "jump"  # Jump action (frogger)
+    SOUND_DIG = "dig"  # Digging (boulder dash, dig dug)
+    SOUND_BACK = "menu_back"
+    SOUND_START = "start"
+    SOUND_PAUSE = "pause"
+    SOUND_RESUME = "resume"
+    SOUND_PELLET = "pellet"
+    SOUND_POWERUP = "powerup"
+    SOUND_SHOT = "shot"
+    SOUND_HIT = "hit"
+    SOUND_ROCK = "rock"
+    SOUND_TURN = "turn"
+    SOUND_ACHIEVEMENT = "achievement"
+    SOUND_COOLDOWNS = {
+        "menu_move": 80,
+        "pellet": 90,
+        "dig": 160,
+        "shot": 60,
+        "hit": 70,
+        "rock": 150,
+        "turn": 90,
+    }
 
     def __init__(self, sounds_dir: Optional[str] = None):
         """Initialize the audio manager.
@@ -47,14 +67,18 @@ class AudioManager:
         self._available = False
         self._muted = False
         self._volume = 0.5
+        self._music_volume = 0.35
+        self._effects_volume = 0.85
         self._sounds: Dict[str, pygame.mixer.Sound] = {}
         self._current_music: Optional[str] = None
+        self._music_paused = False
+        self._last_sound_time = {}
 
         # Determine sounds directory
         if sounds_dir is None:
             # Default to sounds/ in project root
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self._sounds_dir = os.path.join(base_dir, 'sounds')
+            self._sounds_dir = os.path.join(base_dir, "sounds")
         else:
             self._sounds_dir = sounds_dir
 
@@ -83,13 +107,19 @@ class AudioManager:
 
                 # Check if sounds directory exists
                 if os.path.exists(self._sounds_dir):
-                    files = [f for f in os.listdir(self._sounds_dir) if f.endswith(('.wav', '.ogg', '.mp3'))]
+                    files = [
+                        f
+                        for f in os.listdir(self._sounds_dir)
+                        if f.endswith((".wav", ".ogg", ".mp3"))
+                    ]
                     if files:
                         print(f"[AudioManager] Found {len(files)} sound file(s): {files}")
                     else:
                         print(f"[AudioManager] WARNING: No sound files found in {self._sounds_dir}")
                 else:
-                    print(f"[AudioManager] WARNING: Sounds directory does not exist: {self._sounds_dir}")
+                    print(
+                        f"[AudioManager] WARNING: Sounds directory does not exist: {self._sounds_dir}"
+                    )
             else:
                 print("[AudioManager] WARNING: Mixer init returned None")
                 self._available = False
@@ -110,6 +140,10 @@ class AudioManager:
         """Check if audio is currently muted."""
         return self._muted
 
+    @muted.setter
+    def muted(self, value):
+        self.set_mute(value)
+
     @property
     def volume(self) -> float:
         """Get current volume (0.0 to 1.0)."""
@@ -119,11 +153,35 @@ class AudioManager:
     def volume(self, value: float):
         """Set volume (0.0 to 1.0)."""
         self._volume = max(0.0, min(1.0, value))
+        self._apply_volumes()
+
+    @property
+    def music_volume(self):
+        return self._music_volume
+
+    @music_volume.setter
+    def music_volume(self, value):
+        self._music_volume = max(0.0, min(1.0, value))
+        self._apply_volumes()
+
+    @property
+    def effects_volume(self):
+        return self._effects_volume
+
+    @effects_volume.setter
+    def effects_volume(self, value):
+        self._effects_volume = max(0.0, min(1.0, value))
+        self._apply_volumes()
+
+    def _apply_volumes(self):
+        if self._available:
+            pygame.mixer.music.set_volume(self._volume * self._music_volume)
         # Update volume on all cached sounds
         for sound in self._sounds.values():
-            sound.set_volume(self._volume)
+            if sound is not None:
+                sound.set_volume(self._volume * self._effects_volume)
 
-    def toggle_mute(self) -> bool:
+    def toggle_mute(self, *, persist=True) -> bool:
         """Toggle mute state. Returns new mute state."""
         self._muted = not self._muted
         if self._muted:
@@ -133,14 +191,18 @@ class AudioManager:
                 pygame.mixer.music.pause()
         else:
             # Unmute: resume music if it was playing
-            if self._available and self._current_music:
+            if self._available and self._current_music and not self._music_paused:
                 pygame.mixer.music.unpause()
+        if persist:
+            from engine.settings_manager import get_settings_manager
+
+            get_settings_manager().set("muted", self._muted)
         return self._muted
 
-    def set_mute(self, muted: bool):
+    def set_mute(self, muted: bool, *, persist=False):
         """Explicitly set mute state."""
         if muted != self._muted:
-            self.toggle_mute()
+            self.toggle_mute(persist=persist)
 
     def _find_sound_file(self, name: str) -> Optional[str]:
         """Find a sound file by name, trying common extensions.
@@ -151,7 +213,7 @@ class AudioManager:
         Returns:
             Full path to sound file, or None if not found.
         """
-        extensions = ['.wav', '.ogg', '.mp3']
+        extensions = [".wav", ".ogg", ".mp3"]
 
         for ext in extensions:
             path = os.path.join(self._sounds_dir, name + ext)
@@ -186,7 +248,7 @@ class AudioManager:
 
         try:
             sound = pygame.mixer.Sound(path)
-            sound.set_volume(self._volume)
+            sound.set_volume(self._volume * self._effects_volume)
             self._sounds[name] = sound
             print(f"[AudioManager] Loaded sound: {name} from {path}")
             return sound
@@ -207,12 +269,19 @@ class AudioManager:
         if not self._available or self._muted:
             return False
 
+        now = pygame.time.get_ticks()
+        cooldown = self.SOUND_COOLDOWNS.get(name, 0)
+        if now - self._last_sound_time.get(name, -cooldown) < cooldown:
+            return False
+
         sound = self._load_sound(name)
         if sound is None:
             return False
 
         try:
             channel = sound.play()
+            if channel is not None:
+                self._last_sound_time[name] = now
             return channel is not None
         except pygame.error as e:
             print(f"[AudioManager] Error playing sound '{name}': {e}")
@@ -230,6 +299,8 @@ class AudioManager:
         """
         if not self._available:
             return False
+        if self._current_music == name:
+            return True  # Returning from Settings must not restart the home theme.
 
         path = self._find_sound_file(name)
         if path is None:
@@ -237,10 +308,12 @@ class AudioManager:
 
         try:
             pygame.mixer.music.load(path)
-            pygame.mixer.music.set_volume(self._volume * 0.7)  # Music slightly quieter
-            if not self._muted:
-                pygame.mixer.music.play(loops)
+            pygame.mixer.music.set_volume(self._volume * self._music_volume)
+            pygame.mixer.music.play(loops, fade_ms=250)
+            if self._muted:
+                pygame.mixer.music.pause()
             self._current_music = name
+            self._music_paused = False
             return True
         except pygame.error as e:
             print(f"Failed to play music '{name}': {e}")
@@ -254,9 +327,11 @@ class AudioManager:
             except pygame.error:
                 pass
         self._current_music = None
+        self._music_paused = False
 
     def pause_music(self):
         """Pause background music."""
+        self._music_paused = True
         if self._available:
             try:
                 pygame.mixer.music.pause()
@@ -265,6 +340,7 @@ class AudioManager:
 
     def resume_music(self):
         """Resume paused background music."""
+        self._music_paused = False
         if self._available and not self._muted:
             try:
                 pygame.mixer.music.unpause()
@@ -280,6 +356,7 @@ class AudioManager:
             except pygame.error:
                 pass
         self._current_music = None
+        self._music_paused = False
 
     def preload(self, *names: str):
         """Preload sounds into cache for faster playback.

@@ -1,143 +1,71 @@
-"""
-Score Manager - Persistent high score tracking for WES games.
+"""Difficulty-specific records with migration of legacy scores to Normal."""
 
-Provides a centralized system for loading, saving, and updating high scores
-across all games in the Weasel Entertainment System.
-"""
-
-import json
-import os
-from typing import Dict, Optional
+from engine.persistence import JsonStore, data_path, difficulty_key, is_demo
 
 
 class ScoreManager:
-    """Manages high scores with JSON persistence.
+    DEFAULT_FILE = "high_scores.json"
 
-    High scores are stored per-game in a JSON file. The manager handles
-    loading on startup and saving when scores change.
+    def __init__(self, filepath=None):
+        self._filepath = str(data_path(self.DEFAULT_FILE) if filepath is None else filepath)
+        self._store = JsonStore(
+            self._filepath, legacy_name=self.DEFAULT_FILE if filepath is None else None
+        )
+        self._scores = {}
+        for game, value in self._store.load().items():
+            entries = value if isinstance(value, dict) else {"normal": value}
+            scores = {}
+            for difficulty, score in entries.items():
+                try:
+                    if not isinstance(score, bool):
+                        scores[str(difficulty).lower()] = max(0, int(score))
+                except (ValueError, TypeError, OverflowError):
+                    continue
+            self._scores[str(game).lower()] = scores
 
-    Usage:
-        from engine import get_score_manager
+    def get_high_score(self, game_name, difficulty=None):
+        return self._scores.get(game_name.lower(), {}).get(difficulty_key(difficulty), 0)
 
-        score_mgr = get_score_manager()
-        high_score = score_mgr.get_high_score('snake')
-        if current_score > high_score:
-            score_mgr.set_high_score('snake', current_score)
-    """
-
-    DEFAULT_FILE = 'high_scores.json'
-
-    def __init__(self, filepath: Optional[str] = None):
-        """Initialize the score manager.
-
-        Args:
-            filepath: Path to the scores JSON file. If None, uses default
-                     location in the project root directory.
-        """
-        if filepath is None:
-            # Default to project root
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            filepath = os.path.join(base_dir, self.DEFAULT_FILE)
-
-        self._filepath = filepath
-        self._scores: Dict[str, int] = {}
-        self._load()
-
-    def _load(self) -> None:
-        """Load high scores from the JSON file."""
+    def set_high_score(self, game_name, score, difficulty=None):
+        if is_demo():
+            return False
         try:
-            if os.path.exists(self._filepath):
-                with open(self._filepath, 'r') as f:
-                    data = json.load(f)
-                    # Ensure all values are integers
-                    self._scores = {k: int(v) for k, v in data.items()}
-        except (json.JSONDecodeError, ValueError, IOError):
-            # If file is corrupted or unreadable, start fresh
-            self._scores = {}
-
-    def _save(self) -> None:
-        """Save high scores to the JSON file."""
-        try:
-            with open(self._filepath, 'w') as f:
-                json.dump(self._scores, f, indent=2)
-        except IOError:
-            # Silently fail if we can't write (e.g., read-only filesystem)
-            pass
-
-    def get_high_score(self, game_name: str) -> int:
-        """Get the high score for a game.
-
-        Args:
-            game_name: The name of the game (e.g., 'snake', 'pacman').
-
-        Returns:
-            The high score, or 0 if no score has been recorded.
-        """
-        return self._scores.get(game_name.lower(), 0)
-
-    def set_high_score(self, game_name: str, score: int) -> bool:
-        """Set the high score for a game if it's higher than the current record.
-
-        Args:
-            game_name: The name of the game.
-            score: The new score to record.
-
-        Returns:
-            True if this was a new high score, False otherwise.
-        """
-        game_key = game_name.lower()
-        current = self._scores.get(game_key, 0)
-
-        if score > current:
-            self._scores[game_key] = score
-            self._save()
+            score = int(score)
+        except (ValueError, TypeError, OverflowError):
+            return False
+        key = difficulty_key(difficulty)
+        game = game_name.lower()
+        if score > self.get_high_score(game, key):
+            self._scores.setdefault(game, {})[key] = score
+            self.save()
             return True
-
         return False
 
-    def get_all_scores(self) -> Dict[str, int]:
-        """Get all recorded high scores.
+    def get_all_scores(self, difficulty=None):
+        return {
+            game: scores.get(difficulty_key(difficulty), 0) for game, scores in self._scores.items()
+        }
 
-        Returns:
-            A dictionary mapping game names to their high scores.
-        """
-        return self._scores.copy()
+    def reset_score(self, game_name, difficulty=None):
+        if not is_demo():
+            self._scores.get(game_name.lower(), {}).pop(difficulty_key(difficulty), None)
+            self.save()
 
-    def reset_score(self, game_name: str) -> None:
-        """Reset the high score for a specific game.
+    def reset_all_scores(self):
+        if not is_demo():
+            self._scores.clear()
+            self.save()
 
-        Args:
-            game_name: The name of the game.
-        """
-        game_key = game_name.lower()
-        if game_key in self._scores:
-            del self._scores[game_key]
-            self._save()
+    def save(self):
+        return self._store.save(self._scores)
 
-    def reset_all_scores(self) -> None:
-        """Reset all high scores."""
-        self._scores = {}
-        self._save()
-
-    def save(self) -> None:
-        """Explicitly save scores to disk.
-
-        This is called automatically when setting scores, but can be called
-        manually to ensure data is persisted (e.g., during shutdown).
-        """
-        self._save()
+    _save = save
 
 
-# Singleton instance
-_score_manager: Optional[ScoreManager] = None
+_score_manager = None
 
 
-def get_score_manager() -> ScoreManager:
-    """Get the global ScoreManager instance.
-
-    Returns:
-        The singleton ScoreManager instance.
-    """
+def get_score_manager():
     global _score_manager
     if _score_manager is None:
         _score_manager = ScoreManager()
