@@ -39,32 +39,33 @@ except ImportError:
 # =============================================================================
 
 # Default weasel/ferret color palette used for fallback rendering
-FERRET_BROWN: Tuple[int, int, int] = (139, 90, 43)    # Primary body color
-FERRET_TAN: Tuple[int, int, int] = (210, 180, 140)    # Secondary body color
+FERRET_BROWN: Tuple[int, int, int] = (139, 90, 43)  # Primary body color
+FERRET_TAN: Tuple[int, int, int] = (210, 180, 140)  # Secondary body color
 FERRET_WHITE: Tuple[int, int, int] = (255, 248, 220)  # Underbelly/accent
 
 # Sprite sheet configuration
-FRAME_WIDTH: int = 32   # Width of each frame in pixels
+FRAME_WIDTH: int = 32  # Width of each frame in pixels
 FRAME_HEIGHT: int = 32  # Height of each frame in pixels
-FRAMES_PER_ROW: int = 8 # Number of frames per animation row
+FRAMES_PER_ROW: int = 8  # Number of frames per animation row
 
 # Animation state names matching the sprite sheet rows (top to bottom)
 ANIMATION_STATES: Tuple[str, ...] = (
-    'idle',       # Row 0: Default idle animation
-    'idle2',      # Row 1: Alternate idle (e.g., looking around)
-    'movement',   # Row 2: Walking/running animation
-    'dig',        # Row 3: Digging animation
-    'disappear',  # Row 4: Vanishing/hiding animation
-    'jump',       # Row 5: Jumping animation
-    'emerge',     # Row 6: Emerging from ground
-    'sleep',      # Row 7: Sleeping animation
-    'death',      # Row 8: Death animation
+    "idle",  # Row 0: Default idle animation
+    "idle2",  # Row 1: Alternate idle (e.g., looking around)
+    "movement",  # Row 2: Walking/running animation
+    "dig",  # Row 3: Digging animation
+    "disappear",  # Row 4: Vanishing/hiding animation
+    "jump",  # Row 5: Jumping animation
+    "emerge",  # Row 6: Emerging from ground
+    "sleep",  # Row 7: Sleeping animation
+    "death",  # Row 8: Death animation
 )
 
 
 # =============================================================================
 # ANIMATION DATA PARSER
 # =============================================================================
+
 
 def parse_animation_json(json_path: str) -> Dict[str, List[Dict]]:
     """
@@ -95,34 +96,46 @@ def parse_animation_json(json_path: str) -> Dict[str, List[Dict]]:
     animations: Dict[str, List[Dict]] = {}
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
+        with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
+    except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: Could not parse animation JSON: {e}")
         return animations
 
-    frames = data.get('frames', {})
+    if not isinstance(data, dict):
+        return animations
+    frames = data.get("frames", {})
+    if isinstance(frames, list):
+        frames = {
+            frame.get("filename", str(i)): frame
+            for i, frame in enumerate(frames)
+            if isinstance(frame, dict)
+        }
+    if not isinstance(frames, dict):
+        return animations
 
     for frame_name, frame_data in frames.items():
+        if not isinstance(frame_data, dict):
+            continue
         # Parse frame name: "Ferret Sprite Sheet (AnimName) N.ase"
         # Extract the animation name from between parentheses
         try:
             # Find content between parentheses
-            start = frame_name.find('(')
-            end = frame_name.find(')')
+            start = frame_name.find("(")
+            end = frame_name.find(")")
             if start == -1 or end == -1:
                 continue
 
-            anim_name = frame_name[start + 1:end].lower()
+            anim_name = frame_name[start + 1 : end].lower()
 
             # Extract frame rect and duration from JSON
-            frame_rect = frame_data.get('frame', {})
+            frame_rect = frame_data.get("frame", {})
             frame_info = {
-                'x': frame_rect.get('x', 0),
-                'y': frame_rect.get('y', 0),
-                'w': frame_rect.get('w', FRAME_WIDTH),
-                'h': frame_rect.get('h', FRAME_HEIGHT),
-                'duration': frame_data.get('duration', 100)  # ms per frame
+                "x": frame_rect.get("x", 0),
+                "y": frame_rect.get("y", 0),
+                "w": frame_rect.get("w", FRAME_WIDTH),
+                "h": frame_rect.get("h", FRAME_HEIGHT),
+                "duration": frame_data.get("duration", 100),  # ms per frame
             }
 
             # Add to animations dict
@@ -136,7 +149,7 @@ def parse_animation_json(json_path: str) -> Dict[str, List[Dict]]:
     # Sort frames by x position within each animation (ensures correct order)
     # Frames in the same row have the same y, so sorting by x gives frame order
     for anim_name in animations:
-        animations[anim_name].sort(key=lambda f: (f['y'], f['x']))
+        animations[anim_name].sort(key=lambda f: (f["y"], f["x"]))
 
     return animations
 
@@ -144,6 +157,7 @@ def parse_animation_json(json_path: str) -> Dict[str, List[Dict]]:
 # =============================================================================
 # ANIMATED FERRET CLASS
 # =============================================================================
+
 
 class AnimatedFerret:
     """
@@ -187,6 +201,9 @@ class AnimatedFerret:
         ferret.set_state('jump')
     """
 
+    _frame_cache = {}
+    _source_cache = {}
+
     def __init__(
         self,
         x: float = 0,
@@ -228,13 +245,14 @@ class AnimatedFerret:
         self._dy: int = 0
 
         # Animation state
-        self._state: str = 'idle'
+        self._state: str = "idle"
         self._frame: int = 0
         self._frame_timer: int = 0
         self._frame_delay: int = frame_delay
         self._idle_timer: int = 0
         self._is_moving: bool = False
         self._enable_sleep: bool = enable_sleep
+        self.animation_finished = False
 
         # Sprite configuration
         self.scale: int = scale
@@ -253,11 +271,11 @@ class AnimatedFerret:
         self._json_path = json_path
         if self._sprite_path is None or self._json_path is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            media_dir = os.path.join(base_dir, 'media')
+            media_dir = os.path.join(base_dir, "media")
             if self._sprite_path is None:
-                self._sprite_path = os.path.join(media_dir, 'ferret-long-sprite.png')
+                self._sprite_path = os.path.join(media_dir, "ferret-long-sprite.png")
             if self._json_path is None:
-                self._json_path = os.path.join(media_dir, 'ferret-long-sprite.json')
+                self._json_path = os.path.join(media_dir, "ferret-long-sprite.json")
 
         # Load sprites (deferred until pygame is available)
         self._load_sprites()
@@ -280,25 +298,40 @@ class AnimatedFerret:
             self._create_fallback_sprites()
             return
 
+        cache_key = (
+            os.path.abspath(self._sprite_path),
+            os.path.abspath(self._json_path),
+            self._sprite_size,
+        )
+        cached = self._frame_cache.get(cache_key)
+        if cached:
+            self._sprite_sheet, self._animation_data, self._animations, self._animations_flipped = (
+                cached
+            )
+            self._sprites_loaded = True
+            return
         try:
-            # Parse the JSON animation data first
-            # This gives us precise frame coordinates and durations
-            self._animation_data = parse_animation_json(self._json_path)
-
-            # Load the sprite sheet image
-            self._sprite_sheet = pygame.image.load(self._sprite_path).convert_alpha()
-
-            # Extract frames for each animation using JSON data
+            source_key = cache_key[:2]
+            if source_key not in self._source_cache:
+                data = parse_animation_json(self._json_path)
+                sheet = pygame.image.load(self._sprite_path).convert_alpha()
+                self._source_cache[source_key] = (sheet, data)
+            self._sprite_sheet, self._animation_data = self._source_cache[source_key]
+            self._animations = {}
+            self._animations_flipped = {}
             if self._animation_data:
                 self._load_frames_from_json()
             else:
-                # Fallback: load using hardcoded row positions (original approach)
                 self._load_frames_hardcoded()
-
             self._sprites_loaded = True
-
-        except (pygame.error, FileNotFoundError, OSError) as e:
-            print(f"Warning: Failed to load ferret sprites: {e}")
+            self._frame_cache[cache_key] = (
+                self._sprite_sheet,
+                self._animation_data,
+                self._animations,
+                self._animations_flipped,
+            )
+        except (pygame.error, ValueError, TypeError, OSError) as exc:
+            print(f"Warning: Failed to load ferret sprites: {exc}")
             self._create_fallback_sprites()
 
     def _load_frames_from_json(self) -> None:
@@ -319,18 +352,14 @@ class AnimatedFerret:
             for frame_info in frames_data:
                 # Extract frame rect from sprite sheet
                 rect = pygame.Rect(
-                    frame_info['x'],
-                    frame_info['y'],
-                    frame_info['w'],
-                    frame_info['h']
+                    frame_info["x"], frame_info["y"], frame_info["w"], frame_info["h"]
                 )
 
                 # Get subsurface and scale it
                 try:
                     frame_surface = self._sprite_sheet.subsurface(rect)
                     scaled = pygame.transform.scale(
-                        frame_surface,
-                        (self._sprite_size, self._sprite_size)
+                        frame_surface, (self._sprite_size, self._sprite_size)
                     )
                     frames.append(scaled)
                     # Pre-create flipped version to avoid per-frame flip
@@ -370,8 +399,7 @@ class AnimatedFerret:
                 try:
                     frame_surface = self._sprite_sheet.subsurface(rect)
                     scaled = pygame.transform.scale(
-                        frame_surface,
-                        (self._sprite_size, self._sprite_size)
+                        frame_surface, (self._sprite_size, self._sprite_size)
                     )
                     frames.append(scaled)
                     # Pre-create flipped version to avoid per-frame flip
@@ -399,8 +427,17 @@ class AnimatedFerret:
 
         # Create minimal fallback animations
         # At minimum need 'idle' and 'movement'
-        for anim_name in ('idle', 'idle2', 'movement', 'dig', 'disappear',
-                          'jump', 'emerge', 'sleep', 'death'):
+        for anim_name in (
+            "idle",
+            "idle2",
+            "movement",
+            "dig",
+            "disappear",
+            "jump",
+            "emerge",
+            "sleep",
+            "death",
+        ):
             self._animations[anim_name] = [fallback]
             self._animations_flipped[anim_name] = [fallback_flipped]
 
@@ -416,10 +453,7 @@ class AnimatedFerret:
         if pygame is None:
             raise RuntimeError("pygame not initialized")
 
-        surf = pygame.Surface(
-            (self._sprite_size, self._sprite_size),
-            pygame.SRCALPHA
-        )
+        surf = pygame.Surface((self._sprite_size, self._sprite_size), pygame.SRCALPHA)
         # Draw ferret-colored ellipse
         pygame.draw.ellipse(surf, FERRET_BROWN, surf.get_rect())
         # Add a small eye detail
@@ -453,15 +487,16 @@ class AnimatedFerret:
             ValueError: If state name is not recognized.
         """
         if state not in self._animations and state not in ANIMATION_STATES:
-            valid = ', '.join(ANIMATION_STATES)
+            valid = ", ".join(ANIMATION_STATES)
             raise ValueError(f"Unknown animation state '{state}'. Valid states: {valid}")
 
         self._state = state
         if reset_frame:
+            self.animation_finished = False
             self._frame = 0
             self._frame_timer = 0
 
-    def update(self, dx: int = 0, dy: int = 0) -> None:
+    def update(self, dx: int = 0, dy: int = 0, *, auto_state: bool = True) -> None:
         """
         Update ferret position and animation based on input direction.
 
@@ -474,6 +509,7 @@ class AnimatedFerret:
         Args:
             dx: Horizontal direction (-1 = left, 0 = none, 1 = right)
             dy: Vertical direction (-1 = up, 0 = none, 1 = down)
+            auto_state: False preserves a manually chosen animation while advancing it.
 
         The automatic state machine:
         - Moving (dx or dy != 0) -> 'movement' state
@@ -505,46 +541,52 @@ class AnimatedFerret:
             self._is_moving = False
             self._idle_timer += 1
 
-        # Automatic state transitions based on movement
-        # Only override state if not in a "special" animation
-        special_states = {'dig', 'disappear', 'jump', 'emerge', 'death'}
-        if self._state not in special_states:
+        special_states = {"dig", "disappear", "jump", "emerge", "death"}
+        if auto_state and self._state in {"dig", "jump", "emerge"} and self.animation_finished:
+            self.set_state("movement" if self._is_moving else "idle")
+        if auto_state and self._state not in special_states:
             if self._is_moving:
-                if self._state != 'movement':
-                    self.set_state('movement')
+                desired = "movement"
+            elif self._enable_sleep and self._idle_timer >= 900:
+                desired = "sleep"
             else:
-                # Progressive idle states based on idle time
-                # Assuming 60 FPS: 300 frames = 5 sec
-                # Sleep transition only occurs if enable_sleep=True
-                # When enable_sleep=False (default), idle2 is the maximum auto state
-                if self._idle_timer > 300:
-                    if self._state != 'idle2':
-                        self.set_state('idle2', reset_frame=False)
-                else:
-                    if self._state not in ('idle', 'idle2'):
-                        self.set_state('idle')
-
-        # Advance animation frame
+                # Alternate idle cycles; moving or resetting the idle timer restores idle.
+                desired = "idle2" if (self._idle_timer // 300) % 2 else "idle"
+            if self._state != desired:
+                self.set_state(desired)
         self._advance_animation()
 
     def _advance_animation(self) -> None:
-        """
-        Advance to the next animation frame based on frame delay.
-
-        The frame advances every self._frame_delay update() calls.
-        When the last frame is reached, the animation loops back to frame 0.
-        """
+        if self.animation_finished and self._state in {
+            "dig",
+            "disappear",
+            "jump",
+            "emerge",
+            "death",
+        }:
+            return
         self._frame_timer += 1
-
-        if self._frame_timer >= self._frame_delay:
-            self._frame_timer = 0
-
-            # Get current animation frame list
-            anim_frames = self._get_current_animation()
-            num_frames = len(anim_frames)
-
-            if num_frames > 0:
-                self._frame = (self._frame + 1) % num_frames
+        timing = self._animation_data.get(self._state, [])
+        delay = self._frame_delay
+        if timing:
+            duration = timing[self._frame % len(timing)].get("duration", 100)
+            if isinstance(duration, (int, float)):
+                delay = max(1, duration / (1000 / 60) * self._frame_delay / 6)
+        if self._frame_timer >= delay:
+            self._frame_timer -= delay
+            frames = self._get_current_animation()
+            if frames:
+                if self._frame + 1 >= len(frames) and self._state in {
+                    "dig",
+                    "disappear",
+                    "jump",
+                    "emerge",
+                    "death",
+                }:
+                    self._frame = len(frames) - 1
+                    self.animation_finished = True
+                else:
+                    self._frame = (self._frame + 1) % len(frames)
 
     def _get_current_animation(self) -> List[pygame.Surface]:
         """
@@ -559,8 +601,8 @@ class AnimatedFerret:
             return self._animations[self._state]
 
         # Fallback chain: idle2 -> idle, movement -> idle
-        if 'idle' in self._animations:
-            return self._animations['idle']
+        if "idle" in self._animations:
+            return self._animations["idle"]
 
         # Last resort: return any available animation
         for anim in self._animations.values():
@@ -582,8 +624,8 @@ class AnimatedFerret:
             return self._animations_flipped[self._state]
 
         # Fallback chain: idle2 -> idle, movement -> idle
-        if 'idle' in self._animations_flipped:
-            return self._animations_flipped['idle']
+        if "idle" in self._animations_flipped:
+            return self._animations_flipped["idle"]
 
         # Last resort: return any available flipped animation
         for anim in self._animations_flipped.values():
@@ -654,8 +696,21 @@ class AnimatedFerret:
             int(self.x - self._sprite_size // 2),
             int(self.y - self._sprite_size // 2),
             self._sprite_size,
-            self._sprite_size
+            self._sprite_size,
         )
+
+    @staticmethod
+    def body_rect(frame: pygame.Rect) -> pygame.Rect:
+        """Stable contact area around the body in the bottom half of the artwork."""
+        return pygame.Rect(
+            frame.x + frame.w // 4,
+            frame.y + frame.h * 5 // 8,
+            frame.w // 2,
+            frame.h // 4,
+        )
+
+    def get_body_rect(self) -> pygame.Rect:
+        return self.body_rect(self.get_rect())
 
     def set_position(self, x: float, y: float) -> None:
         """
@@ -708,10 +763,13 @@ class AnimatedFerret:
         """Reset animation to frame 0 of current state."""
         self._frame = 0
         self._frame_timer = 0
+        self.animation_finished = False
 
     def reset_idle_timer(self) -> None:
         """Reset the idle timer (prevents automatic idle2/sleep transitions)."""
         self._idle_timer = 0
+        if self._state in ("idle2", "sleep"):
+            self.set_state("idle")
 
     @property
     def sprite_size(self) -> int:
@@ -725,7 +783,7 @@ class AnimatedFerret:
         Args:
             size: New pixel size for the sprite (width and height).
         """
-        self._sprite_size = size
+        self.set_sprite_size(size)
 
     def set_sprite_size(self, size: int) -> None:
         """Set the sprite display size (method form for compatibility).
@@ -733,7 +791,10 @@ class AnimatedFerret:
         Args:
             size: New pixel size for the sprite (width and height).
         """
-        self._sprite_size = size
+        size = max(1, int(size))
+        if size != self._sprite_size:
+            self._sprite_size = size
+            self._load_sprites()
 
     @property
     def is_moving(self) -> bool:
@@ -764,7 +825,7 @@ class AnimatedFerret:
 # MODULE-LEVEL TESTING
 # =============================================================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     """
     Standalone test mode - run this file directly to test the AnimatedFerret class.
 
@@ -796,15 +857,15 @@ if __name__ == '__main__':
 
     # Map number keys to animation states
     state_keys = {
-        pygame.K_1: 'idle',
-        pygame.K_2: 'idle2',
-        pygame.K_3: 'movement',
-        pygame.K_4: 'dig',
-        pygame.K_5: 'disappear',
-        pygame.K_6: 'jump',
-        pygame.K_7: 'emerge',
-        pygame.K_8: 'sleep',
-        pygame.K_9: 'death',
+        pygame.K_1: "idle",
+        pygame.K_2: "idle2",
+        pygame.K_3: "movement",
+        pygame.K_4: "dig",
+        pygame.K_5: "disappear",
+        pygame.K_6: "jump",
+        pygame.K_7: "emerge",
+        pygame.K_8: "sleep",
+        pygame.K_9: "death",
     }
 
     running = True

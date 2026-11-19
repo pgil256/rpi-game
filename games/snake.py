@@ -1,5 +1,5 @@
 """
-Snake Game - Weasel Entertainment System
+Snake Game - Winston Entertainment System
 
 A ferret-themed snake game using the AnimatedFerret sprite for the snake head.
 The snake body uses the weasel color palette (brown, tan, white repeating).
@@ -9,11 +9,11 @@ import pygame
 import random
 import sys
 import os
+from collections import deque
 
 # Add parent directory to path for engine imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import engine
 from engine import (
     BaseGame,
     AnimatedFerret,
@@ -22,7 +22,6 @@ from engine import (
     get_score_manager,
     WINDOW_WIDTH,
     WINDOW_HEIGHT,
-    FPS,
     WHITE,
     RED,
     WEASEL_BROWN,
@@ -31,13 +30,14 @@ from engine import (
 
 # Game constants
 CELL_SIZE = 32  # Larger cells for better visibility (was 20)
-GRID_WIDTH = WINDOW_WIDTH // CELL_SIZE   # 25 cells wide (800/32)
+GRID_WIDTH = WINDOW_WIDTH // CELL_SIZE  # 25 cells wide (800/32)
 GRID_HEIGHT = WINDOW_HEIGHT // CELL_SIZE  # 18 cells tall (600/32)
+FIRST_PLAY_ROW = 2  # Keep food and movement below the HUD.
 SNAKE_FPS = 10  # Snake moves at 10 FPS, slower than render FPS
 
 # Enhanced cute meadow color palette - softer and more vibrant
-MEADOW_LIGHT = (170, 220, 140)    # Softer light grass
-MEADOW_DARK = (140, 200, 120)     # Softer darker grass patches
+MEADOW_LIGHT = (170, 220, 140)  # Softer light grass
+MEADOW_DARK = (140, 200, 120)  # Softer darker grass patches
 MEADOW_FLOWER_1 = (255, 182, 193)  # Pink flower dots (lighter)
 MEADOW_FLOWER_2 = (173, 216, 230)  # Baby blue flower dots
 MEADOW_FLOWER_3 = (255, 255, 180)  # Soft yellow flower dots
@@ -63,16 +63,16 @@ class SnakeGame(BaseGame):
     # Difficulty presets
     DIFFICULTY_PRESETS = {
         Difficulty.EASY: {
-            'snake_fps': 6,       # Slower movement
-            'walls_kill': False,  # Wrap around edges
+            "snake_fps": 6,  # Slower movement
+            "walls_kill": False,  # Wrap around edges
         },
         Difficulty.NORMAL: {
-            'snake_fps': 10,      # Normal speed
-            'walls_kill': False,  # Wrap around edges
+            "snake_fps": 10,  # Normal speed
+            "walls_kill": False,  # Wrap around edges
         },
         Difficulty.HARD: {
-            'snake_fps': 14,      # Faster movement
-            'walls_kill': True,   # Hitting walls = death
+            "snake_fps": 14,  # Faster movement
+            "walls_kill": True,  # Hitting walls = death
         },
     }
 
@@ -82,13 +82,14 @@ class SnakeGame(BaseGame):
 
         # Apply difficulty settings
         preset = self.DIFFICULTY_PRESETS[self.difficulty]
-        self.snake_fps = preset['snake_fps']
-        self.walls_kill = preset['walls_kill']
+        self.snake_fps = preset["snake_fps"]
+        self.walls_kill = preset["walls_kill"]
 
         # Load food sprite (soupbowl)
         from engine import AssetLoader
+
         self.asset_loader = AssetLoader()
-        self.food_img = self.asset_loader.load_image('soupbowl.png', (CELL_SIZE, CELL_SIZE))
+        self.food_img = self.asset_loader.load_image("soupbowl.png", (CELL_SIZE, CELL_SIZE))
 
         # Game timing
         self.move_timer = 0
@@ -111,36 +112,46 @@ class SnakeGame(BaseGame):
         self._background.fill(MEADOW_LIGHT)
 
         # Draw softer grass patches with more organic shapes
-        random.seed(42)  # Consistent pattern
+        rng = random.Random(42)  # Decorations must not reseed gameplay.
         for _ in range(100):
-            x = random.randint(0, WINDOW_WIDTH)
-            y = random.randint(0, WINDOW_HEIGHT)
-            w = random.randint(40, 100)
-            h = random.randint(30, 60)
+            x = rng.randint(0, WINDOW_WIDTH)
+            y = rng.randint(0, WINDOW_HEIGHT)
+            w = rng.randint(40, 100)
+            h = rng.randint(30, 60)
             pygame.draw.ellipse(self._background, MEADOW_DARK, (x, y, w, h))
 
         # Draw small flower dots with more variety
-        flower_colors = [MEADOW_FLOWER_1, MEADOW_FLOWER_2, MEADOW_FLOWER_3,
-                        MEADOW_FLOWER_4, MEADOW_FLOWER_5]
+        flower_colors = [
+            MEADOW_FLOWER_1,
+            MEADOW_FLOWER_2,
+            MEADOW_FLOWER_3,
+            MEADOW_FLOWER_4,
+            MEADOW_FLOWER_5,
+        ]
         for _ in range(90):
-            x = random.randint(5, WINDOW_WIDTH - 5)
-            y = random.randint(5, WINDOW_HEIGHT - 5)
-            color = random.choice(flower_colors)
-            size = random.randint(3, 7)
+            x = rng.randint(5, WINDOW_WIDTH - 5)
+            y = rng.randint(5, WINDOW_HEIGHT - 5)
+            color = rng.choice(flower_colors)
+            size = rng.randint(3, 7)
             pygame.draw.circle(self._background, color, (x, y), size)
             # Add golden center dot for some flowers
-            if random.random() > 0.4:
+            if rng.random() > 0.4:
                 pygame.draw.circle(self._background, (255, 220, 100), (x, y), max(1, size // 2))
 
         # Draw tiny grass tufts
         tuft_color = (100, 160, 80)
         for _ in range(50):
-            x = random.randint(10, WINDOW_WIDTH - 10)
-            y = random.randint(10, WINDOW_HEIGHT - 10)
+            x = rng.randint(10, WINDOW_WIDTH - 10)
+            y = rng.randint(10, WINDOW_HEIGHT - 10)
             for i in range(3):
-                dx = random.randint(-3, 3)
-                pygame.draw.line(self._background, tuft_color,
-                               (x + dx, y), (x + dx + random.randint(-2, 2), y - random.randint(4, 8)), 1)
+                dx = rng.randint(-3, 3)
+                pygame.draw.line(
+                    self._background,
+                    tuft_color,
+                    (x + dx, y),
+                    (x + dx + rng.randint(-2, 2), y - rng.randint(4, 8)),
+                    1,
+                )
 
         # Draw very subtle grid lines
         grid_color = (155, 210, 130)  # Very subtle
@@ -148,8 +159,6 @@ class SnakeGame(BaseGame):
             pygame.draw.line(self._background, grid_color, (gx, 0), (gx, WINDOW_HEIGHT), 1)
         for gy in range(0, WINDOW_HEIGHT, CELL_SIZE):
             pygame.draw.line(self._background, grid_color, (0, gy), (WINDOW_WIDTH, gy), 1)
-
-        random.seed()  # Reset random seed
 
         # Initialize food sparkle effect
         self._food_sparkle_timer = 0
@@ -162,8 +171,12 @@ class SnakeGame(BaseGame):
         start_y = GRID_HEIGHT // 2
 
         # Direction (0, 0) means waiting for first input
-        self.direction = (0, 0)
-        self.next_direction = (0, 0)  # Buffered direction change
+        self.direction = (1, 0)
+        self.turn_queue = deque(maxlen=2)
+        self._last_dpad = (0, 0)
+        self.move_timer = 0
+        self.move_delay = 1.0 / self.snake_fps
+        self.won = False
 
         # Create snake as list of AnimatedFerret sprites
         # Each segment is a ferret at a grid position
@@ -174,7 +187,7 @@ class SnakeGame(BaseGame):
         head_pixel_x = start_x * CELL_SIZE + CELL_SIZE // 2
         head_pixel_y = start_y * CELL_SIZE + CELL_SIZE // 2
         head = self._create_ferret_segment(head_pixel_x, head_pixel_y)
-        head.set_state('idle')
+        head.set_state("idle")
         self.body_sprites.append(head)
         self.snake.append((start_x, start_y))
 
@@ -183,7 +196,7 @@ class SnakeGame(BaseGame):
             seg_x = (start_x - i) * CELL_SIZE + CELL_SIZE // 2
             seg_y = start_y * CELL_SIZE + CELL_SIZE // 2
             segment = self._create_ferret_segment(seg_x, seg_y)
-            segment.set_state('idle')
+            segment.set_state("idle")
             # Offset animation frames so they don't all animate in sync
             segment._frame = i * 2
             self.body_sprites.append(segment)
@@ -200,7 +213,7 @@ class SnakeGame(BaseGame):
         self.game_over = False
         self.waiting_for_input = True
         self.score_manager = get_score_manager()
-        self.high_score = self.score_manager.get_high_score('snake')
+        self.high_score = self.score_manager.get_high_score("snake", self.difficulty)
         self.new_high_score = False
         self.paused = False
 
@@ -224,11 +237,14 @@ class SnakeGame(BaseGame):
 
     def _spawn_food(self):
         """Spawn food at random location not occupied by snake."""
-        while True:
-            x = random.randint(0, GRID_WIDTH - 1)
-            y = random.randint(0, GRID_HEIGHT - 1)
-            if (x, y) not in self.snake:
-                return (x, y)
+        occupied = set(self.snake)
+        free = [
+            (x, y)
+            for y in range(FIRST_PLAY_ROW, GRID_HEIGHT)
+            for x in range(GRID_WIDTH)
+            if (x, y) not in occupied
+        ]
+        return random.choice(free) if free else None
 
     def handle_input(self):
         """Process player input. Returns True to exit to menu."""
@@ -250,37 +266,29 @@ class SnakeGame(BaseGame):
 
         # Check for action button (restart after game over)
         if self.game_over and not self.playing_death:
-            if self.input_manager.action_pressed():
+            if self.input_manager.confirm_pressed():
+                self.restart_session()
                 self.reset_game()
                 return False
 
         # Don't process movement during death animation
-        if self.playing_death or self.playing_dig:
+        if self.playing_death or self.game_over:
             return False
 
         # Get D-pad input
         dp = self.input_manager.get_dpad()
 
-        # Buffer direction change (prevent 180-degree turns)
-        if dp != (0, 0):
-            # Check for valid direction change
-            # Note: When waiting_for_input, prevent left since body starts to the left of head
-            if dp[1] == -1 and self.direction != (0, 1):  # Up
-                self.next_direction = (0, -1)
-            elif dp[1] == 1 and self.direction != (0, -1):  # Down
-                self.next_direction = (0, 1)
-            elif dp[0] == -1 and self.direction != (1, 0) and not self.waiting_for_input:  # Left
-                self.next_direction = (-1, 0)
-            elif dp[0] == 1 and self.direction != (-1, 0):  # Right
-                self.next_direction = (1, 0)
-
-            # First input starts the game (only if a valid direction was set)
-            if self.waiting_for_input and self.next_direction != (0, 0):
+        if dp != self._last_dpad and dp != (0, 0):
+            turn = (0, dp[1]) if dp[1] else (dp[0], 0)
+            previous = self.turn_queue[-1] if self.turn_queue else self.direction
+            if turn != (-previous[0], -previous[1]):
+                if turn != previous and len(self.turn_queue) < self.turn_queue.maxlen:
+                    self.turn_queue.append(turn)
+                    self.audio.play_sound(AudioManager.SOUND_TURN)
                 self.waiting_for_input = False
-                self.direction = self.next_direction
-                # Set all ferrets to movement state
                 for sprite in self.body_sprites:
-                    sprite.set_state('movement')
+                    sprite.set_state("movement")
+        self._last_dpad = dp
 
         return False
 
@@ -293,7 +301,8 @@ class SnakeGame(BaseGame):
         # Update all ferret animations
         # Don't pass movement to ferret.update() since we handle position via grid
         for sprite in self.body_sprites:
-            sprite.update(0, 0)
+            # Grid positions are owned here; advance frames without reverting to idle.
+            sprite._advance_animation()
 
         # Handle death animation
         if self.playing_death:
@@ -303,23 +312,13 @@ class SnakeGame(BaseGame):
                 self.playing_death = False
                 self.game_over = True
                 # Check and save high score
-                if self.score_manager.set_high_score('snake', self.score):
+                if self.score_manager.set_high_score("snake", self.score, self.difficulty):
                     self.new_high_score = True
                     self.high_score = self.score
                 # Check achievements
-                self.achievements.unlock('snake_first')
-                if self.score >= 50:
-                    self.achievements.unlock('snake_50')
-                if self.score >= 100:
-                    self.achievements.unlock('snake_100')
-                if self.difficulty == Difficulty.HARD and self.score >= 30:
-                    self.achievements.unlock('snake_hard_win')
+                self.achievements.unlock("snake_first")
                 # Track statistics
-                self.stats.increment('snake', 'games_played')
-                self.stats.increment('snake', 'deaths')
-                self.stats.add('snake', 'total_score', self.score)
-                self.stats.max_stat('snake', 'highest_length', len(self.snake))
-                self.stats.increment('global', 'games_started')
+                self._finalize_game_statistics()
             return
 
         # Handle dig animation (eating food)
@@ -328,9 +327,7 @@ class SnakeGame(BaseGame):
             # Dig animation is brief (~0.3 seconds)
             if self.animation_timer >= 0.3:
                 self.playing_dig = False
-                self.ferret.set_state('movement')
-            return
-
+                self.ferret.set_state("movement")
         # Don't update if game over or waiting for input
         if self.game_over or self.waiting_for_input:
             return
@@ -338,12 +335,16 @@ class SnakeGame(BaseGame):
         # Accumulate time for snake movement
         self.move_timer += dt
 
-        if self.move_timer >= self.move_delay:
-            self.move_timer = 0
+        while (
+            self.move_timer + 1e-9 >= self.move_delay
+            and not self.playing_death
+            and not self.game_over
+        ):
+            self.move_timer -= self.move_delay
 
             # Apply buffered direction
-            if self.next_direction != (0, 0):
-                self.direction = self.next_direction
+            if self.turn_queue:
+                self.direction = self.turn_queue.popleft()
 
             # Move snake
             if self.direction != (0, 0):
@@ -355,15 +356,23 @@ class SnakeGame(BaseGame):
         new_head = (head_x + self.direction[0], head_y + self.direction[1])
 
         # Check wall collision
-        if (new_head[0] < 0 or new_head[0] >= GRID_WIDTH or
-            new_head[1] < 0 or new_head[1] >= GRID_HEIGHT):
+        if (
+            new_head[0] < 0
+            or new_head[0] >= GRID_WIDTH
+            or new_head[1] < FIRST_PLAY_ROW
+            or new_head[1] >= GRID_HEIGHT
+        ):
             if self.walls_kill:
                 # Hard mode: walls kill
                 self._trigger_death()
                 return
             else:
                 # Easy/Normal mode: wrap around edges
-                new_head = (new_head[0] % GRID_WIDTH, new_head[1] % GRID_HEIGHT)
+                new_head = (
+                    new_head[0] % GRID_WIDTH,
+                    FIRST_PLAY_ROW
+                    + (new_head[1] - FIRST_PLAY_ROW) % (GRID_HEIGHT - FIRST_PLAY_ROW),
+                )
 
         # Check self collision (exclude tail which will move)
         if new_head in self.snake[:-1]:
@@ -398,19 +407,42 @@ class SnakeGame(BaseGame):
         # Check food collision
         if new_head == self.food:
             self.score += 10
+            if self.score == 30 and self.difficulty == Difficulty.HARD:
+                self.achievements.unlock("snake_hard_win")
+            if self.score in (50, 100):
+                self.achievements.unlock(f"snake_{self.score}")
             self.food = self._spawn_food()
             # Grow the snake (add new ferret at tail position)
             self._grow_snake(prev_positions[-1], prev_facings[-1])
+            self.move_delay = 1.0 / min(
+                self.snake_fps + 6, self.snake_fps + (len(self.snake) - 3) // 5
+            )
             # Trigger dig animation on head
             self._trigger_dig()
+            if self.food is None:
+                self.won = self.game_over = True
+                self.playing_dig = False
+                self.stats.increment("global", "games_completed")
+                self._finalize_game_statistics()
+                self.achievements.unlock("snake_first")
+                self.new_high_score = self.score_manager.set_high_score(
+                    "snake", self.score, self.difficulty
+                )
+                self.high_score = max(self.high_score, self.score)
         else:
             # Remove tail position from grid
             self.snake.pop()
 
+    def _record_game_statistics(self):
+        died = self.playing_death or (self.game_over and not self.won)
+        self.stats.increment("snake", "deaths", int(died))
+        self.stats.add("snake", "total_score", self.score)
+        self.stats.max_stat("snake", "highest_length", len(self.snake))
+
     def _grow_snake(self, tail_pos, tail_facing):
         """Add a new AnimatedFerret segment at the tail position."""
         new_segment = self._create_ferret_segment(tail_pos[0], tail_pos[1])
-        new_segment.set_state('movement')
+        new_segment.set_state("movement")
         new_segment.facing_right = tail_facing
         # Offset frame to desync animation
         new_segment._frame = len(self.body_sprites) % 8
@@ -423,14 +455,14 @@ class SnakeGame(BaseGame):
         self.high_score = max(self.high_score, self.score)
         # Set death state on all ferret sprites
         for sprite in self.body_sprites:
-            sprite.set_state('death')
+            sprite.set_state("death")
         self.audio.play_sound(AudioManager.SOUND_DEATH)
 
     def _trigger_dig(self):
         """Trigger dig animation when eating food."""
         self.playing_dig = True
         self.animation_timer = 0
-        self.ferret.set_state('dig')
+        self.ferret.set_state("dig")
         self.audio.play_sound(AudioManager.SOUND_COLLECT)
 
     def render(self):
@@ -440,41 +472,24 @@ class SnakeGame(BaseGame):
         # Draw cute meadow background (pre-generated with flowers)
         self.screen.blit(self._background, (0, 0))
 
-        # Draw food with sparkle glow effect
-        food_x = self.food[0] * CELL_SIZE
-        food_y = self.food[1] * CELL_SIZE
-        food_cx = food_x + CELL_SIZE // 2
-        food_cy = food_y + CELL_SIZE // 2
-
-        # Animate food sparkle timer
-        self._food_sparkle_timer += 1
-
-        # Draw pulsing glow behind food
-        glow_pulse = abs(math.sin(self._food_sparkle_timer * 0.1)) * 0.5 + 0.5
-        glow_size = int(CELL_SIZE * 0.8 + glow_pulse * 8)
-        glow_alpha = int(80 + glow_pulse * 40)
-        glow_surf = pygame.Surface((glow_size * 2, glow_size * 2), pygame.SRCALPHA)
-        pygame.draw.circle(glow_surf, (*SPARKLE_GOLD, glow_alpha), (glow_size, glow_size), glow_size)
-        self.screen.blit(glow_surf, (food_cx - glow_size, food_cy - glow_size))
-
-        # Draw sparkle stars around food
-        for i in range(4):
-            angle = (self._food_sparkle_timer * 0.05 + i * 1.57)
-            dist = 18 + math.sin(self._food_sparkle_timer * 0.15 + i) * 5
-            sx = food_cx + math.cos(angle) * dist
-            sy = food_cy + math.sin(angle) * dist
-            star_size = 3 + int(math.sin(self._food_sparkle_timer * 0.2 + i * 0.5) * 2)
-            if star_size > 0:
-                sparkle_surf = pygame.Surface((star_size * 2 + 2, star_size * 2 + 2), pygame.SRCALPHA)
-                pygame.draw.line(sparkle_surf, SPARKLE_WHITE, (0, star_size), (star_size * 2, star_size), 2)
-                pygame.draw.line(sparkle_surf, SPARKLE_WHITE, (star_size, 0), (star_size, star_size * 2), 2)
-                self.screen.blit(sparkle_surf, (int(sx - star_size), int(sy - star_size)))
-
-        # Draw food sprite
-        if self.food_img:
-            self.screen.blit(self.food_img, (food_x, food_y))
-        else:
-            pygame.draw.rect(self.screen, (255, 100, 100), (food_x, food_y, CELL_SIZE, CELL_SIZE))
+        if self.food is not None:
+            food_x, food_y = (value * CELL_SIZE for value in self.food)
+            food_cx, food_cy = food_x + CELL_SIZE // 2, food_y + CELL_SIZE // 2
+            self._food_sparkle_timer += 1
+            if not hasattr(self, "_food_glow"):
+                self._food_glow = pygame.Surface((64, 64), pygame.SRCALPHA)
+                pygame.draw.circle(self._food_glow, (*SPARKLE_GOLD, 100), (32, 32), 28)
+            self.screen.blit(self._food_glow, (food_cx - 32, food_cy - 32))
+            for i in range(4):
+                angle = self._food_sparkle_timer * 0.05 + i * math.pi / 2
+                sx = round(food_cx + math.cos(angle) * 22)
+                sy = round(food_cy + math.sin(angle) * 22)
+                pygame.draw.line(self.screen, SPARKLE_WHITE, (sx - 3, sy), (sx + 3, sy), 2)
+                pygame.draw.line(self.screen, SPARKLE_WHITE, (sx, sy - 3), (sx, sy + 3), 2)
+            if self.food_img:
+                self.screen.blit(self.food_img, (food_x, food_y))
+            else:
+                pygame.draw.rect(self.screen, RED, (food_x, food_y, CELL_SIZE, CELL_SIZE))
 
         # Draw all ferret sprites (tail to head so head appears on top)
         for sprite in reversed(self.body_sprites):
@@ -512,95 +527,20 @@ class SnakeGame(BaseGame):
             self.screen.blit(sprite, (draw_x, draw_y))
         else:
             # Fallback: draw colored circle
-            pygame.draw.circle(self.screen, WEASEL_BROWN,
-                             (int(ferret_sprite.x), int(ferret_sprite.y)), CELL_SIZE // 2 - 2)
+            pygame.draw.circle(
+                self.screen,
+                WEASEL_BROWN,
+                (int(ferret_sprite.x), int(ferret_sprite.y)),
+                CELL_SIZE // 2 - 2,
+            )
 
     def _draw_game_over(self):
-        """Draw game over overlay."""
-        # Use cached overlay surface
-        if not hasattr(self, '_game_over_overlay'):
-            self._game_over_overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
-            self._game_over_overlay.fill((0, 0, 0, 180))
-        self.screen.blit(self._game_over_overlay, (0, 0))
-
-        y_offset = -50 if self.new_high_score else -30
-
-        # New high score message
-        if self.new_high_score:
-            hs_text = self.font.render("NEW HIGH SCORE!", True, (255, 215, 0))
-            hs_rect = hs_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + y_offset))
-            self.screen.blit(hs_text, hs_rect)
-            y_offset += 40
-
-        # Game over text
-        go_text = self.font.render("GAME OVER", True, RED)
-        go_rect = go_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + y_offset))
-        self.screen.blit(go_text, go_rect)
-
-        # Restart prompt
-        restart_text = self.font.render("A/START restart, B menu", True, WHITE)
-        restart_rect = restart_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + y_offset + 40))
-        self.screen.blit(restart_text, restart_rect)
+        self._draw_game_over_overlay(
+            title="MEADOW COMPLETE!" if self.won else "GAME OVER", score=self.score
+        )
 
     def _draw_start_prompt(self):
         """Draw start prompt when waiting for first input."""
         prompt_text = self.font.render("D-pad or Arrows to start", True, WHITE)
         prompt_rect = prompt_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2))
         self.screen.blit(prompt_text, prompt_rect)
-
-    def run(self):
-        """Override run to use SNAKE_FPS for timing but smooth render."""
-        dt = 0
-
-        while True:
-            # Event processing
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        return
-                    if event.key == pygame.K_m:
-                        self.audio.toggle_mute()
-
-            # Handle input
-            if self.handle_input():
-                return
-
-            # Update with delta time
-            self.update(dt)
-
-            # Render
-            self.render()
-
-            # Display and timing (uses scaling in fullscreen mode)
-            engine.scale_to_screen()
-            dt = self.clock.tick(FPS) / 1000.0
-
-
-def run_snake(screen, input_manager):
-    """
-    Entry point for running snake game from launcher.
-
-    Args:
-        screen: Pygame display surface
-        input_manager: InputManager instance
-    """
-    game = SnakeGame(screen, input_manager)
-    game.run()
-
-
-# Allow running standalone for testing
-if __name__ == "__main__":
-    pygame.init()
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("Snake - Weasel Entertainment System")
-
-    from engine import InputManager
-    input_manager = InputManager()
-
-    game = SnakeGame(screen, input_manager)
-    game.run()
-
-    pygame.quit()

@@ -1,41 +1,30 @@
-WEASEL ENTERTAINMENT SYSTEM - SOUND EFFECTS
-============================================
+WINSTON ENTERTAINMENT SYSTEM - ORIGINAL AUDIO
+===========================================
 
-This directory contains sound effects for the game launcher.
-If sound files are missing, the game will work silently without errors.
+Regenerate all files from the project root:
+    python generate_sounds.py
 
-REQUIRED SOUND FILES:
---------------------
-Add any of these files (.wav, .ogg, or .mp3 format):
+Seven original 16-bar looping themes:
+    home_theme.wav        Warm, playful welcome (96 BPM, C major)
+    snake_theme.wav       Light, nimble movement (116 BPM, D major)
+    pacman_theme.wav      Tunnel Treats chase (128 BPM, C minor)
+    frogger_theme.wav     Bouncy crossing theme (110 BPM, F major)
+    centipede_theme.wav   Burrow Defender pulse (138 BPM, A minor)
+    digdug_theme.wav      Crystal Quest exploration (104 BPM, D minor)
+    boulderdash_theme.wav Rocky Burrow exploration (100 BPM, C minor)
 
-menu_move.wav     - Soft click/chirp for menu navigation
-menu_select.wav   - Confirmation sound when selecting a game
-collect.wav       - Positive chime when collecting items (food, pellets, diamonds)
-death.wav         - Negative sound when hit/dying
-victory.wav       - Celebration jingle for winning
-jump.wav          - Jump sound effect (used in Frogger)
-dig.wav           - Digging sound (used in Boulder Dash, Dig Dug)
+Each has melody, arpeggiated harmony, bass, and quiet synthesized percussion.
+Music is 22050 Hz, mono, 16-bit PCM, with headroom and zero-valued loop edges.
+Effects are 44100 Hz, mono, 16-bit PCM, with short attack/release fades.
 
-SPECIFICATIONS:
---------------
-- Format: WAV (recommended), OGG, or MP3
-- Duration: Keep sounds short (<1 second) to avoid being annoying on repeat
-- Sample rate: 22050 Hz or 44100 Hz
-- Channels: Mono or Stereo
+Eighteen effects:
+    menu_move, menu_select, menu_back, start, pause, resume,
+    collect, pellet, powerup, jump, dig, shot, hit, rock, turn,
+    death, victory, achievement
 
-CONTROLS:
---------
-Press M at any time to toggle mute on/off (persists across games)
+Settings provides master, music and effects levels. M toggles global mute.
+Music is quieter than effects by default; repeated action sounds are throttled.
+Game music pauses on pause/game over and stops when returning to the home screen.
 
-FINDING FREE SOUNDS:
--------------------
-- freesound.org - Free community sounds (requires account)
-- opengameart.org - Free game assets including sounds
-- kenney.nl/assets - Free game assets pack
-
-GENERATING SIMPLE SOUNDS:
-------------------------
-You can use tools like:
-- sfxr/jsfxr (retro 8-bit style sounds)
-- Audacity (for recording/editing)
-- ChipTone (web-based chip tune generator)
+All notes and synthesized sounds are authored in generate_sounds.py. No audio
+from legacy_reference or third-party recordings is included in the build.

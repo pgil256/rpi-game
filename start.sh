@@ -1,38 +1,20 @@
-#!/bin/bash
-# Weasel Entertainment System - Raspberry Pi Start Script
-#
-# This script starts the game with optimal settings for Raspberry Pi.
-# Install as auto-start by creating /etc/xdg/autostart/wes.desktop:
-#
-#   [Desktop Entry]
-#   Type=Application
-#   Name=Weasel Entertainment System
-#   Exec=/home/pi/wes/start.sh
-#   X-GNOME-Autostart-enabled=true
-#
-# Or add to /etc/rc.local (before 'exit 0'):
-#   su - pi -c '/home/pi/wes/start.sh' &
-
-# Get the directory where this script is located
+#!/usr/bin/env bash
+# Single launch path. Let SDL select X11/Wayland/audio unless explicitly set.
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-# Set environment variables for Raspberry Pi optimization
-export SDL_VIDEODRIVER=x11  # or 'kmsdrm' for console-only
-export SDL_AUDIODRIVER=pulse  # or 'alsa' for direct ALSA
-
-# Disable screen saver and power management
-if command -v xset &> /dev/null; then
-    xset s off
-    xset -dpms
-    xset s noblank
+PYTHON="$SCRIPT_DIR/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    echo 'Missing .venv. Run ./setup_rpi.sh or python3 scripts/package.py install.' >&2
+    exit 1
 fi
-
-# Activate virtual environment if it exists
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" && -z "${SDL_VIDEODRIVER:-}" ]]; then
+    export SDL_VIDEODRIVER=kmsdrm
 fi
-
-# Run the game
-# Use nice to give the game high priority
-exec nice -n -5 python3 game_launcher.py "$@"
+# Prevent duplicate startup from old/manual entries without requiring root.
+if command -v flock >/dev/null 2>&1; then
+    LOCK_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+    exec 9>"$LOCK_DIR/wes-${UID}.lock"
+    flock -n 9 || exit 0
+fi
+exec "$PYTHON" "$SCRIPT_DIR/game_launcher.py" "$@"

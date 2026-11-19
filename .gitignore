@@ -39,3 +39,14 @@ Thumbs.db
 CLAUDE.md
 AGENTS.md
 .mcp.json
+
+# Runtime data and local verification
+high_scores.json
+controller_config.json
+launch.txt
+*.log
+.pytest_cache/
+.ruff_cache/
+verification/local/
+
+.packaging/

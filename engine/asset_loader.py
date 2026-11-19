@@ -1,24 +1,37 @@
-"""Centralized asset loading with caching for the Weasel Entertainment System.
+"""Centralized asset loading with caching for the Winston Entertainment System.
 
 Includes LRU cache management, platform-aware optimizations, and
 game-specific asset loading/unloading for memory efficiency.
 """
 
 import os
-import sys
+import logging
 import platform
 from collections import OrderedDict
-from typing import Optional, Tuple, Dict, Set
+from typing import Optional, Tuple
 import pygame
 
 
 # Note: Color constants are defined in engine/__init__.py
 # Import them if needed within this module, but they're primarily
 # for external use. We keep local references for fallback surfaces.
-WEASEL_BROWN = (139, 90, 43)      # Brown for head/front
-WEASEL_TAN = (210, 180, 140)      # Tan/cream for body
-WEASEL_WHITE = (255, 248, 220)    # Cream white for underbelly
-BURROW_BROWN = (101, 67, 33)      # Dark earthy brown for background
+WEASEL_BROWN = (139, 90, 43)  # Brown for head/front
+WEASEL_TAN = (210, 180, 140)  # Tan/cream for body
+WEASEL_WHITE = (255, 248, 220)  # Cream white for underbelly
+BURROW_BROWN = (101, 67, 33)  # Dark earthy brown for background
+
+
+def gem_sprite(size):
+    """Faceted crystal shared by the underground campaigns."""
+    gem = pygame.Surface((32, 32), pygame.SRCALPHA)
+    outline = [(3, 12), (9, 5), (23, 5), (29, 12), (16, 28)]
+    pygame.draw.polygon(gem, (48, 62, 94), outline)
+    pygame.draw.polygon(gem, (110, 224, 244), [(5, 12), (10, 7), (22, 7), (27, 12)])
+    pygame.draw.polygon(gem, (81, 165, 224), [(5, 13), (27, 13), (16, 25)])
+    pygame.draw.polygon(gem, (174, 245, 252), [(11, 13), (21, 13), (16, 25)])
+    pygame.draw.line(gem, (246, 255, 255), (9, 10), (12, 7), 2)
+    return pygame.transform.scale(gem, (size, size))
+
 
 # Platform detection
 def detect_platform() -> str:
@@ -29,21 +42,21 @@ def detect_platform() -> str:
     """
     system = platform.system().lower()
 
-    if system == 'linux':
+    if system == "linux":
         # Check for Raspberry Pi
         try:
-            with open('/proc/cpuinfo', 'r') as f:
+            with open("/proc/cpuinfo", "r") as f:
                 cpuinfo = f.read().lower()
-                if 'raspberry' in cpuinfo or 'bcm' in cpuinfo:
-                    return 'raspberry_pi'
+                if "raspberry" in cpuinfo or "bcm" in cpuinfo:
+                    return "raspberry_pi"
         except (IOError, OSError):
             pass
-        return 'linux'
-    elif system == 'windows':
-        return 'windows'
-    elif system == 'darwin':
-        return 'macos'
-    return 'unknown'
+        return "linux"
+    elif system == "windows":
+        return "windows"
+    elif system == "darwin":
+        return "macos"
+    return "unknown"
 
 
 # Default cache limits based on platform
@@ -53,22 +66,9 @@ def get_default_cache_limit() -> int:
     Returns smaller limits on resource-constrained platforms like RPi.
     """
     plat = detect_platform()
-    if plat == 'raspberry_pi':
+    if plat == "raspberry_pi":
         return 50  # Smaller cache for RPi
     return 100  # Default for desktop
-
-
-# Game asset paths for lazy loading
-GAME_ASSET_PATHS = {
-    'snake': [],  # Snake uses procedural graphics
-    'pacman': ['soupcan_new.png', 'soupbowl.png'],
-    'frogger': ['ferret-long-sprite.png'],
-    'centipede': [],  # Centipede uses procedural graphics
-    'digdug': ['ferret-long-sprite.png'],
-    'boulderdash': [
-        'games/boulder-dash/images/',  # Directory prefix
-    ],
-}
 
 
 def get_weasel_color(index: int) -> Tuple[int, int, int]:
@@ -99,13 +99,15 @@ class AssetLoader:
     - Automatic surface.convert()/convert_alpha() for optimal blitting
     - Optional integer scaling for pixel art
     - Graceful fallbacks when files are missing
-    - Game-specific asset preloading and unloading
+    - Shared bounded image cache
     - Platform-aware optimizations
     - Optional debug logging for missing assets
     """
 
     # Class-level debug mode flag
     debug_mode: bool = False
+    _shared_caches = {}
+    _missing = set()
 
     @classmethod
     def set_debug_mode(cls, enabled: bool) -> None:
@@ -128,30 +130,24 @@ class AssetLoader:
         if base_dir is None:
             # Try to find the project root by looking for media/ directory
             check_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if os.path.isdir(os.path.join(check_dir, 'media')):
+            if os.path.isdir(os.path.join(check_dir, "media")):
                 base_dir = check_dir
             else:
                 base_dir = os.getcwd()
 
         self.base_dir = base_dir
-        self.media_dir = os.path.join(base_dir, 'media')
+        self.media_dir = os.path.join(base_dir, "media")
 
         # LRU caches using OrderedDict (last accessed items at end)
-        self._image_cache: OrderedDict[str, pygame.Surface] = OrderedDict()
-        self._sound_cache: Dict[str, Optional[pygame.mixer.Sound]] = {}
+        self._image_cache = self._shared_caches.setdefault(os.path.abspath(base_dir), OrderedDict())
 
         # Cache limit (0 = unlimited)
         self._cache_limit = cache_limit if cache_limit is not None else get_default_cache_limit()
-
-        # Track which assets belong to which game for unloading
-        self._game_assets: Dict[str, Set[str]] = {}
-        self._current_game: Optional[str] = None
 
         # Platform info
         self.platform = detect_platform()
 
         # Track if audio is available
-        self._audio_available = pygame.mixer.get_init() is not None
 
     def _evict_lru(self) -> None:
         """Evict the least recently used item from cache if over limit."""
@@ -167,28 +163,13 @@ class AssetLoader:
         if cache_key in self._image_cache:
             self._image_cache.move_to_end(cache_key)
 
-    def _track_game_asset(self, cache_key: str) -> None:
-        """Track an asset as belonging to the current game."""
-        if self._current_game:
-            if self._current_game not in self._game_assets:
-                self._game_assets[self._current_game] = set()
-            self._game_assets[self._current_game].add(cache_key)
-
-    def set_current_game(self, game_name: Optional[str]) -> None:
-        """Set the current game for asset tracking.
-
-        Args:
-            game_name: Name of the game (e.g., 'snake', 'pacman'), or None.
-        """
-        self._current_game = game_name
-
     def load_image(
         self,
         filename: str,
         size: Optional[Tuple[int, int]] = None,
         use_integer_scaling: bool = True,
         preserve_aspect: bool = False,
-        has_alpha: bool = True
+        has_alpha: bool = True,
     ) -> Optional[pygame.Surface]:
         """Load an image from the media directory with optional scaling.
 
@@ -251,13 +232,14 @@ class AssetLoader:
 
             # Store in cache and track for current game
             self._image_cache[cache_key] = img
-            self._track_game_asset(cache_key)
 
             return img
 
         except (pygame.error, FileNotFoundError, OSError) as e:
-            if self.debug_mode:
-                print(f"[AssetLoader] Warning: Failed to load image '{filename}': {e}")
+            missing_key = (self.media_dir, filename)
+            if missing_key not in self._missing:
+                logging.getLogger(__name__).warning("Cannot load image %s: %s", filename, e)
+                self._missing.add(missing_key)
             return None
 
     def create_fallback_surface(
@@ -265,7 +247,7 @@ class AssetLoader:
         size: Tuple[int, int],
         color: Tuple[int, int, int],
         with_border: bool = False,
-        border_color: Tuple[int, int, int] = (255, 255, 255)
+        border_color: Tuple[int, int, int] = (255, 255, 255),
     ) -> pygame.Surface:
         """Create a colored fallback surface when an image is unavailable.
 
@@ -292,7 +274,7 @@ class AssetLoader:
         size: Tuple[int, int],
         fallback_color: Tuple[int, int, int],
         use_integer_scaling: bool = True,
-        with_border: bool = False
+        with_border: bool = False,
     ) -> pygame.Surface:
         """Load an image with automatic fallback to a colored surface.
 
@@ -311,261 +293,15 @@ class AssetLoader:
             return img
         return self.create_fallback_surface(size, fallback_color, with_border)
 
-    def load_sprite_sheet(
-        self,
-        filename: str,
-        frame_size: Tuple[int, int],
-        frame_names: Dict[str, Tuple[int, int]],
-        scale: Optional[int] = None
-    ) -> Dict[str, pygame.Surface]:
-        """Load a sprite sheet and extract named subsurfaces.
-
-        Args:
-            filename: Sprite sheet filename within the media/ directory.
-            frame_size: (width, height) of each frame in the sheet.
-            frame_names: Dict mapping names to (col, row) grid positions.
-                        Example: {"idle": (0, 0), "walk1": (1, 0), "walk2": (2, 0)}
-            scale: Optional integer scale factor (e.g., 2 for 2x size).
-
-        Returns:
-            Dict mapping frame names to pygame Surfaces.
-            Returns empty dict if sprite sheet loading fails.
-        """
-        sprites: Dict[str, pygame.Surface] = {}
-
-        # Load the full sprite sheet (uncached, we cache individual frames)
-        try:
-            path = os.path.join(self.media_dir, filename)
-            sheet = pygame.image.load(path).convert_alpha()
-        except (pygame.error, FileNotFoundError, OSError):
-            return sprites
-
-        frame_w, frame_h = frame_size
-
-        for name, (col, row) in frame_names.items():
-            x = col * frame_w
-            y = row * frame_h
-
-            # Extract the subsurface
-            try:
-                frame = sheet.subsurface((x, y, frame_w, frame_h)).copy()
-
-                if scale and scale > 1:
-                    new_size = (frame_w * scale, frame_h * scale)
-                    frame = pygame.transform.scale(frame, new_size)
-
-                sprites[name] = frame
-
-            except ValueError:
-                # Subsurface out of bounds
-                continue
-
-        return sprites
-
-    def load_sprite_sheet_grid(
-        self,
-        filename: str,
-        frame_size: Tuple[int, int],
-        cols: int,
-        rows: int,
-        scale: Optional[int] = None
-    ) -> list:
-        """Load a sprite sheet as a flat list of frames in row-major order.
-
-        Args:
-            filename: Sprite sheet filename within the media/ directory.
-            frame_size: (width, height) of each frame in the sheet.
-            cols: Number of columns in the sprite sheet.
-            rows: Number of rows in the sprite sheet.
-            scale: Optional integer scale factor.
-
-        Returns:
-            List of pygame Surfaces in row-major order.
-            Returns empty list if sprite sheet loading fails.
-        """
-        sprites = []
-
-        try:
-            path = os.path.join(self.media_dir, filename)
-            sheet = pygame.image.load(path).convert_alpha()
-        except (pygame.error, FileNotFoundError, OSError):
-            return sprites
-
-        frame_w, frame_h = frame_size
-
-        for row in range(rows):
-            for col in range(cols):
-                x = col * frame_w
-                y = row * frame_h
-
-                try:
-                    frame = sheet.subsurface((x, y, frame_w, frame_h)).copy()
-
-                    if scale and scale > 1:
-                        new_size = (frame_w * scale, frame_h * scale)
-                        frame = pygame.transform.scale(frame, new_size)
-
-                    sprites.append(frame)
-
-                except ValueError:
-                    continue
-
-        return sprites
-
-    def load_sound(
-        self,
-        filename: str,
-        volume: float = 1.0
-    ) -> Optional[pygame.mixer.Sound]:
-        """Load a sound file with graceful fallback if audio is unavailable.
-
-        Args:
-            filename: Sound filename within the media/ directory.
-            volume: Volume level from 0.0 to 1.0.
-
-        Returns:
-            The loaded pygame Sound object, or None if loading failed
-            or audio is unavailable.
-        """
-        if not self._audio_available:
-            return None
-
-        cache_key = f"{filename}|{volume}"
-
-        if cache_key in self._sound_cache:
-            return self._sound_cache[cache_key]
-
-        try:
-            path = os.path.join(self.media_dir, filename)
-            sound = pygame.mixer.Sound(path)
-            sound.set_volume(volume)
-            self._sound_cache[cache_key] = sound
-            return sound
-
-        except (pygame.error, FileNotFoundError, OSError) as e:
-            if self.debug_mode:
-                print(f"[AssetLoader] Warning: Failed to load sound '{filename}': {e}")
-            self._sound_cache[cache_key] = None
-            return None
-
-    def play_sound(self, filename: str, volume: float = 1.0) -> bool:
-        """Load and immediately play a sound.
-
-        Args:
-            filename: Sound filename within the media/ directory.
-            volume: Volume level from 0.0 to 1.0.
-
-        Returns:
-            True if the sound was played, False otherwise.
-        """
-        sound = self.load_sound(filename, volume)
-        if sound:
-            sound.play()
-            return True
-        return False
-
     def clear_cache(self):
-        """Clear all cached assets to free memory."""
+        """Clear the shared image cache for this asset root."""
         self._image_cache.clear()
-        self._sound_cache.clear()
-        self._game_assets.clear()
 
-    def preload_images(self, filenames: list, size: Optional[Tuple[int, int]] = None):
-        """Preload multiple images into the cache.
-
-        Args:
-            filenames: List of image filenames to preload.
-            size: Optional size to scale all images to.
-        """
-        for filename in filenames:
-            self.load_image(filename, size)
-
-    def preload_game(self, game_name: str) -> int:
-        """Preload all known assets for a specific game.
-
-        This improves initial load time by loading assets before
-        the game starts. Assets are tracked for later unloading.
-
-        Args:
-            game_name: Name of the game (e.g., 'snake', 'pacman').
-
-        Returns:
-            Number of assets preloaded.
-        """
-        if game_name not in GAME_ASSET_PATHS:
-            return 0
-
-        old_game = self._current_game
-        self.set_current_game(game_name)
-
-        count = 0
-        for asset_path in GAME_ASSET_PATHS[game_name]:
-            if asset_path.endswith('/'):
-                # It's a directory prefix - scan for files
-                dir_path = os.path.join(self.media_dir, asset_path)
-                if os.path.isdir(dir_path):
-                    for filename in os.listdir(dir_path):
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                            full_path = os.path.join(asset_path, filename)
-                            if self.load_image(full_path):
-                                count += 1
-            else:
-                # Single file
-                if self.load_image(asset_path):
-                    count += 1
-
-        self.set_current_game(old_game)
-
-        if self.debug_mode:
-            print(f"[AssetLoader] Preloaded {count} assets for {game_name}")
-
-        return count
-
-    def unload_game(self, game_name: str) -> int:
-        """Unload all assets associated with a specific game.
-
-        Removes game-specific assets from the cache to free memory.
-        Useful when switching between games.
-
-        Args:
-            game_name: Name of the game to unload.
-
-        Returns:
-            Number of assets unloaded.
-        """
-        if game_name not in self._game_assets:
-            return 0
-
-        count = 0
-        for cache_key in list(self._game_assets[game_name]):
-            if cache_key in self._image_cache:
-                del self._image_cache[cache_key]
-                count += 1
-
-        del self._game_assets[game_name]
-
-        if self.debug_mode:
-            print(f"[AssetLoader] Unloaded {count} assets for {game_name}")
-
-        return count
-
-    def get_cache_stats(self) -> dict:
-        """Get statistics about the asset cache.
-
-        Returns:
-            Dict with cache statistics.
-        """
-        return {
-            'image_count': len(self._image_cache),
-            'sound_count': len(self._sound_cache),
-            'cache_limit': self._cache_limit,
-            'platform': self.platform,
-            'games_tracked': list(self._game_assets.keys()),
-        }
+    def get_cache_stats(self):
+        return {"images": len(self._image_cache), "limit": self._cache_limit}
 
 
-# Convenience: create a default global loader instance
-_default_loader: Optional[AssetLoader] = None
+_default_loader = None
 
 
 def get_default_loader() -> AssetLoader:
@@ -577,9 +313,7 @@ def get_default_loader() -> AssetLoader:
 
 
 def load_media_image(
-    filename: str,
-    size: Optional[Tuple[int, int]] = None,
-    preserve_aspect: bool = False
+    filename: str, size: Optional[Tuple[int, int]] = None, preserve_aspect: bool = False
 ) -> Optional[pygame.Surface]:
     """Convenience function matching the original game_launcher API.
 

@@ -1,8 +1,8 @@
 """
-Pac-Man game implementation for the Weasel Entertainment System.
+Tunnel Treats maze game implementation for the Winston Entertainment System.
 
 Uses AnimatedFerret for the player with directional animations and death sequence.
-Ghosts are represented by soupcan sprites (ferret vs soup cans theme).
+Ghosts are represented by original garden critter artwork.
 Power pellets (large soupbowls) allow the player to eat ghosts temporarily.
 """
 
@@ -10,6 +10,7 @@ import os
 import sys
 import math
 import random
+from collections import deque
 import pygame
 from typing import Optional, Tuple, List
 
@@ -25,25 +26,18 @@ from engine import (
     get_score_manager,
     WINDOW_WIDTH,
     WINDOW_HEIGHT,
-    BLACK,
     WHITE,
-    RED,
     YELLOW,
-    CYAN,
     BLUE,
-    WEASEL_BROWN,
-    WEASEL_TAN,
-    WEASEL_WHITE,
-    PASTEL_SKY,
 )
 
 # Enhanced cute color palette for underground cave theme
-CAVE_BG_DARK = (25, 20, 40)           # Deep purple-black background
-CAVE_BG_MID = (40, 30, 60)            # Slightly lighter cave
-CAVE_WALL_GLOW = (180, 140, 200)      # Soft purple wall glow
-MAZE_WALL_CUTE = (160, 120, 180)      # Softer lavender walls
-PELLET_GLOW = (255, 255, 200)         # Warm yellow glow
-POWER_PELLET_GLOW = (255, 200, 255)   # Pink power pellet glow
+CAVE_BG_DARK = (25, 20, 40)  # Deep purple-black background
+CAVE_BG_MID = (40, 30, 60)  # Slightly lighter cave
+CAVE_WALL_GLOW = (180, 140, 200)  # Soft purple wall glow
+MAZE_WALL_CUTE = (160, 120, 180)  # Softer lavender walls
+PELLET_GLOW = (255, 255, 200)  # Warm yellow glow
+POWER_PELLET_GLOW = (255, 200, 255)  # Pink power pellet glow
 
 
 class Wall(pygame.sprite.Sprite):
@@ -56,33 +50,86 @@ class Wall(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(top=y, left=x)
 
 
+PEN_EXIT = (303, 213)
+PEN_CENTER = (303, 273)
+
+
+class MazeRoutes:
+    """Connected corridor centers, with the pen gate closed to roaming enemies."""
+
+    def __init__(self, walls, gate):
+        blockers = [sprite.rect for sprite in (*walls, *gate)]
+        boxes = {}
+        for y in range(33, 574, 30):
+            for x in range(33, 574, 30):
+                rect = pygame.Rect(x - 10, y - 10, 20, 20)
+                if rect.collidelist(blockers) < 0:
+                    boxes[x, y] = rect
+        self.neighbors = {}
+        pending = [PEN_EXIT]
+        while pending:
+            node = pending.pop()
+            if node in self.neighbors:
+                continue
+            x, y = node
+            neighbors = []
+            for other in ((x - 30, y), (x + 30, y), (x, y - 30), (x, y + 30)):
+                if other in boxes and boxes[node].union(boxes[other]).collidelist(blockers) < 0:
+                    neighbors.append(other)
+            self.neighbors[node] = neighbors
+            pending.extend(neighbors)
+        self._distances = {}
+
+    def next_node(self, node, target, previous=None):
+        goal = min(self.neighbors, key=lambda p: (p[0] - target[0]) ** 2 + (p[1] - target[1]) ** 2)
+        if goal not in self._distances:
+            distances = {goal: 0}
+            queue = deque([goal])
+            while queue:
+                current = queue.popleft()
+                for other in self.neighbors[current]:
+                    if other not in distances:
+                        distances[other] = distances[current] + 1
+                        queue.append(other)
+            self._distances[goal] = distances
+        choices = self.neighbors[node]
+        forward = [point for point in choices if point != previous]
+        return min(forward or choices, key=self._distances[goal].__getitem__)
+
+
 class Ghost(pygame.sprite.Sprite):
     """A ghost enemy with AI-driven chase behavior."""
 
     # Ghost behavior modes
-    MODE_CHASE = 'chase'
-    MODE_SCATTER = 'scatter'
-    MODE_FRIGHTENED = 'frightened'
-    MODE_EATEN = 'eaten'
+    MODE_CHASE = "chase"
+    MODE_SCATTER = "scatter"
+    MODE_FRIGHTENED = "frightened"
+    MODE_EATEN = "eaten"
 
     # Speed settings
-    NORMAL_SPEED = 2.3      # Normal movement speed (closer to player speed)
+    NORMAL_SPEED = 2.3  # Normal movement speed (closer to player speed)
     CRUISE_ELROY_SPEED = 2.7  # Blinky's speed when few pellets remain
     CRUISE_ELROY2_SPEED = 3.0  # Even faster when very few pellets remain
     FRIGHTENED_SPEED = 1.2  # Slower when vulnerable
-    EATEN_SPEED = 4.0       # Fast when returning to spawn
+    EATEN_SPEED = 4.0  # Fast when returning to spawn
 
     # Flash colors for frightened mode (soup can colors cycling)
     FLASH_COLORS = [
-        (255, 100, 100),   # Light red
-        (100, 100, 255),   # Light blue
-        (255, 255, 100),   # Yellow
-        (100, 255, 100),   # Green
+        (255, 100, 100),  # Light red
+        (100, 100, 255),  # Light blue
+        (255, 255, 100),  # Yellow
+        (100, 255, 100),  # Green
     ]
 
-    def __init__(self, x: int, y: int, normal_image: pygame.Surface,
-                 frightened_image: pygame.Surface, ghost_type: str,
-                 spawn_pos: Tuple[int, int]):
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        normal_image: pygame.Surface,
+        frightened_image: pygame.Surface,
+        ghost_type: str,
+        spawn_pos: Tuple[int, int],
+    ):
         super().__init__()
         self.normal_image = normal_image
         self.frightened_image = frightened_image  # Not used anymore, kept for API compat
@@ -100,32 +147,35 @@ class Ghost(pygame.sprite.Sprite):
         self.x = float(x)
         self.y = float(y)
 
-        # Decision cooldown to prevent jittery movement
-        self.decision_cooldown = 0
-        self.last_decision_pos = (x, y)
+        self.routes = None
+        self._previous_node = None
+        self._waypoint = None
+        self._pen_path = deque()
 
         # Scatter/chase cycle timer (for better AI pacing)
         self.mode_timer = 0
-        self.scatter_duration = 180   # 3 seconds scatter (shorter = more aggressive)
-        self.chase_duration = 1200    # 20 seconds chase
+        self.scatter_duration = 180  # 3 seconds scatter (shorter = more aggressive)
+        self.chase_duration = 1200  # 20 seconds chase
 
         # Spawn delay - ghosts wait in pen before emerging
-        self.spawn_delay = 0          # Frames to wait before leaving spawn
-        self.in_spawn = True          # Whether ghost is still in spawn pen
+        self.spawn_delay = 0  # Frames to wait before leaving spawn
+        self.in_spawn = True  # Whether ghost is still in spawn pen
 
         # Cruise Elroy mode for Blinky (speeds up when few pellets left)
-        self.elroy_mode = 0           # 0=normal, 1=elroy1, 2=elroy2
+        self.elroy_mode = 0  # 0=normal, 1=elroy1, 2=elroy2
+        self._tinted_images = {
+            color: self._create_tinted_image(color) for color in self.FLASH_COLORS
+        }
+        self._eyes_image = pygame.Surface((30, 30), pygame.SRCALPHA)
+        for x in (10, 20):
+            pygame.draw.circle(self._eyes_image, WHITE, (x, 12), 5)
+            pygame.draw.circle(self._eyes_image, BLUE, (x, 12), 2)
 
     def _create_tinted_image(self, color: Tuple[int, int, int]) -> pygame.Surface:
-        """Create a color-tinted version of the soup can for flashing effect."""
+        """Keep the transparent silhouette while flashing the critter's markings."""
         tinted = self.normal_image.copy()
-        # Create a color overlay
-        overlay = pygame.Surface(tinted.get_size(), pygame.SRCALPHA)
-        overlay.fill((*color, 128))  # Semi-transparent tint
-        tinted.blit(overlay, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-        # Add the color as an additive blend for brightness
-        overlay.fill((*color, 80))
-        tinted.blit(overlay, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+        tinted.fill(color, special_flags=pygame.BLEND_RGB_MULT)
+        tinted.fill(tuple(value // 3 for value in color), special_flags=pygame.BLEND_RGB_ADD)
         return tinted
 
     def set_frightened(self, duration: int):
@@ -134,36 +184,39 @@ class Ghost(pygame.sprite.Sprite):
             self.mode = self.MODE_FRIGHTENED
             self.frightened_timer = duration
             self.flash_timer = 0
-            # Reverse direction when frightened
-            self.direction = (-self.direction[0], -self.direction[1])
+            if not self.in_spawn and self._waypoint and self._previous_node:
+                self._waypoint, self._previous_node = self._previous_node, self._waypoint
 
     def get_eaten(self):
         """Ghost was eaten by player - return to spawn."""
         self.mode = self.MODE_EATEN
         self.frightened_timer = 0
 
-    def update(self, walls: pygame.sprite.Group, player_pos: Tuple[int, int],
-               player_dir: Tuple[int, int], blinky_pos: Optional[Tuple[int, int]] = None,
-               gate: Optional[pygame.sprite.Group] = None):
+    def update(
+        self,
+        walls: pygame.sprite.Group,
+        player_pos: Tuple[int, int],
+        player_dir: Tuple[int, int],
+        blinky_pos: Optional[Tuple[int, int]] = None,
+        gate: Optional[pygame.sprite.Group] = None,
+        *,
+        power_ticks=None,
+    ):
         """Update ghost position using AI-driven movement."""
 
-        # Handle spawn delay - ghost waits in pen before emerging
-        if self.in_spawn:
-            if self.spawn_delay > 0:
-                self.spawn_delay -= 1
-                # Bounce up and down slightly while waiting
-                bounce = math.sin(self.spawn_delay * 0.15) * 2
-                self.y = self.spawn_pos[1] + bounce
-                self.rect.center = (int(self.x), int(self.y))
-                return
-            else:
-                # Time to leave the spawn - move up through gate
-                self.in_spawn = False
-                # Center horizontally on gate (gate is at x=303) and move above it
-                self.x = 303
-                self.y = self.spawn_pos[1] - 60  # Move above the gate
-                self.direction = (-1, 0)  # Start moving left to avoid getting stuck
+        if self.routes is None:
+            self.routes = MazeRoutes(walls, () if gate is None else gate)
+        if power_ticks is None:
+            power_ticks = max(0, self.frightened_timer - 1)
+        if self.mode != self.MODE_EATEN:
+            if power_ticks:
+                if self.mode != self.MODE_FRIGHTENED:
+                    self.set_frightened(power_ticks)
+                self.frightened_timer = power_ticks
+                self.flash_timer += 1
+            elif self.mode == self.MODE_FRIGHTENED:
                 self.mode = self.MODE_CHASE
+                self.frightened_timer = self.mode_timer = 0
 
         # Update mode timer for scatter/chase cycling (only in normal modes)
         if self.mode in (self.MODE_CHASE, self.MODE_SCATTER):
@@ -175,15 +228,6 @@ class Ghost(pygame.sprite.Sprite):
                 self.mode = self.MODE_SCATTER
                 self.mode_timer = 0
 
-        # Update frightened timer
-        if self.mode == self.MODE_FRIGHTENED:
-            self.frightened_timer -= 1
-            self.flash_timer += 1
-            if self.frightened_timer <= 0:
-                self.mode = self.MODE_CHASE
-                self.mode_timer = 0
-                self.consecutive_ghost_bonus = 0
-
         # Update image based on mode
         if self.mode == self.MODE_FRIGHTENED:
             # Flash through colors using the soup can sprite
@@ -191,14 +235,10 @@ class Ghost(pygame.sprite.Sprite):
                 color_index = (self.flash_timer // 5) % len(self.FLASH_COLORS)
             else:
                 color_index = (self.flash_timer // 10) % len(self.FLASH_COLORS)
-            self.image = self._create_tinted_image(self.FLASH_COLORS[color_index])
+            self.image = self._tinted_images[self.FLASH_COLORS[color_index]]
         elif self.mode == self.MODE_EATEN:
             # Draw as small eyes only (simplified)
-            self.image = pygame.Surface((30, 30), pygame.SRCALPHA)
-            pygame.draw.circle(self.image, WHITE, (10, 12), 5)
-            pygame.draw.circle(self.image, WHITE, (20, 12), 5)
-            pygame.draw.circle(self.image, BLUE, (10, 12), 2)
-            pygame.draw.circle(self.image, BLUE, (20, 12), 2)
+            self.image = self._eyes_image
         else:
             self.image = self.normal_image
 
@@ -210,7 +250,7 @@ class Ghost(pygame.sprite.Sprite):
             speed = self.FRIGHTENED_SPEED
         elif self.mode == self.MODE_EATEN:
             speed = self.EATEN_SPEED
-        elif self.ghost_type == 'blinky' and self.elroy_mode > 0:
+        elif self.ghost_type == "blinky" and self.elroy_mode > 0:
             # Cruise Elroy - Blinky speeds up when few pellets remain
             if self.elroy_mode >= 2:
                 speed = self.CRUISE_ELROY2_SPEED
@@ -219,23 +259,57 @@ class Ghost(pygame.sprite.Sprite):
         else:
             speed = self.NORMAL_SPEED
 
-        # AI movement - choose best direction at intersections
-        self._move_towards_target(target, walls, speed)
+        if self.in_spawn:
+            if self.spawn_delay:
+                self.spawn_delay -= 1
+            else:
+                if not self._pen_path:
+                    self._pen_path.extend((PEN_CENTER, PEN_EXIT))
+                if self._move_to(self._pen_path[0], speed):
+                    self._pen_path.popleft()
+                    if not self._pen_path:
+                        if self.mode == self.MODE_EATEN:
+                            self.mode = self.MODE_CHASE
+                            if power_ticks:
+                                self.set_frightened(power_ticks)
+                            self.spawn_delay = 45
+                        else:
+                            self.in_spawn = False
+        else:
+            if self._waypoint is None:
+                node = (int(self.x), int(self.y))
+                if self.mode == self.MODE_EATEN and node == PEN_EXIT:
+                    self.in_spawn = True
+                    self._pen_path.extend((PEN_CENTER, self.spawn_pos))
+                    self._previous_node = None
+                else:
+                    returning = self.mode == self.MODE_EATEN
+                    self._waypoint = self.routes.next_node(
+                        node,
+                        PEN_EXIT if returning else target,
+                        None if returning else self._previous_node,
+                    )
+                    self._previous_node = node
+            if self._waypoint is not None and self._move_to(self._waypoint, speed):
+                self._waypoint = None
+        self.rect.center = (round(self.x), round(self.y))
 
-        # Check if eaten ghost reached spawn
-        if self.mode == self.MODE_EATEN:
-            spawn_dist = math.sqrt((self.x - self.spawn_pos[0])**2 +
-                                   (self.y - self.spawn_pos[1])**2)
-            if spawn_dist < 15:
-                self.mode = self.MODE_CHASE
-                self.mode_timer = 0
-                self.x, self.y = float(self.spawn_pos[0]), float(self.spawn_pos[1])
+    def _move_to(self, point, speed):
+        dx, dy = point[0] - self.x, point[1] - self.y
+        if dx or dy:
+            self.direction = (
+                (int(math.copysign(1, dx)), 0) if dx else (0, int(math.copysign(1, dy)))
+            )
+            self.x += self.direction[0] * min(abs(dx), speed)
+            self.y += self.direction[1] * min(abs(dy), speed)
+        return (self.x, self.y) == point
 
-        # Update rect position
-        self.rect.center = (int(self.x), int(self.y))
-
-    def _get_target(self, player_pos: Tuple[int, int], player_dir: Tuple[int, int],
-                    blinky_pos: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+    def _get_target(
+        self,
+        player_pos: Tuple[int, int],
+        player_dir: Tuple[int, int],
+        blinky_pos: Optional[Tuple[int, int]],
+    ) -> Tuple[int, int]:
         """Get target position based on ghost type and mode."""
         if self.mode == self.MODE_EATEN:
             return self.spawn_pos
@@ -256,25 +330,25 @@ class Ghost(pygame.sprite.Sprite):
         if self.mode == self.MODE_SCATTER:
             # Each ghost has a corner target in scatter mode
             corners = {
-                'blinky': (550, 50),
-                'pinky': (50, 50),
-                'inky': (550, 550),
-                'clyde': (50, 550),
+                "blinky": (550, 50),
+                "pinky": (50, 50),
+                "inky": (550, 550),
+                "clyde": (50, 550),
             }
             return corners.get(self.ghost_type, (300, 300))
 
         # Chase mode - each ghost has different targeting
-        if self.ghost_type == 'blinky':
+        if self.ghost_type == "blinky":
             # Blinky: Direct chase - targets player position
             return player_pos
 
-        elif self.ghost_type == 'pinky':
+        elif self.ghost_type == "pinky":
             # Pinky: Ambush - targets 4 tiles ahead of player (more aggressive)
             ahead_x = player_pos[0] + player_dir[0] * 120
             ahead_y = player_pos[1] + player_dir[1] * 120
             return (int(ahead_x), int(ahead_y))
 
-        elif self.ghost_type == 'inky':
+        elif self.ghost_type == "inky":
             # Inky: Unpredictable - uses Blinky's position
             if blinky_pos:
                 # Target is reflection of Blinky through a point 2 tiles ahead of player
@@ -285,10 +359,9 @@ class Ghost(pygame.sprite.Sprite):
                 return (int(target_x), int(target_y))
             return player_pos
 
-        elif self.ghost_type == 'clyde':
+        elif self.ghost_type == "clyde":
             # Clyde: Shy - chases when far, scatters when close (but less shy now)
-            dist = math.sqrt((self.x - player_pos[0])**2 +
-                             (self.y - player_pos[1])**2)
+            dist = math.sqrt((self.x - player_pos[0]) ** 2 + (self.y - player_pos[1]) ** 2)
             if dist > 100:  # Only retreats when very close
                 return player_pos
             else:
@@ -296,117 +369,18 @@ class Ghost(pygame.sprite.Sprite):
 
         return player_pos
 
-    def _move_towards_target(self, target: Tuple[int, int],
-                              walls: pygame.sprite.Group, speed: float):
-        """Move ghost towards target, avoiding walls with smarter pathfinding."""
-        # Decrease decision cooldown
-        if self.decision_cooldown > 0:
-            self.decision_cooldown -= 1
-
-        # Check if we've moved enough to make a new decision
-        dist_from_last = math.sqrt((self.x - self.last_decision_pos[0])**2 +
-                                   (self.y - self.last_decision_pos[1])**2)
-
-        # Only make new direction decisions at intersections (every ~25 pixels)
-        should_decide = dist_from_last >= 25 or self.decision_cooldown <= 0
-
-        if should_decide:
-            # Get possible directions
-            directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # up, down, left, right
-
-            # Don't reverse direction (ghosts can't turn around) unless stuck
-            if self.direction != (0, 0):
-                reverse = (-self.direction[0], -self.direction[1])
-                directions_no_reverse = [d for d in directions if d != reverse]
-            else:
-                directions_no_reverse = directions
-
-            # Find valid directions (no wall collision)
-            valid_dirs = []
-            for d in directions_no_reverse:
-                if self._can_move_direction(d, walls, speed):
-                    valid_dirs.append(d)
-
-            # If no valid directions without reversing, allow reverse
-            if not valid_dirs:
-                for d in directions:
-                    if self._can_move_direction(d, walls, speed):
-                        valid_dirs.append(d)
-
-            if not valid_dirs:
-                # Completely stuck - shouldn't happen but handle it
-                valid_dirs = [(1, 0)]
-
-            # Choose direction closest to target (greedy pathfinding)
-            best_dir = valid_dirs[0]
-            best_dist = float('inf')
-            for d in valid_dirs:
-                # Project position in this direction
-                new_x = self.x + d[0] * 30
-                new_y = self.y + d[1] * 30
-                dist = math.sqrt((new_x - target[0])**2 + (new_y - target[1])**2)
-
-                # Add slight randomness for frightened mode
-                if self.mode == self.MODE_FRIGHTENED:
-                    dist += random.uniform(-20, 20)
-
-                if dist < best_dist:
-                    best_dist = dist
-                    best_dir = d
-
-            # Update direction if changed
-            if best_dir != self.direction:
-                self.direction = best_dir
-                self.last_decision_pos = (self.x, self.y)
-                self.decision_cooldown = 15  # Don't change direction too quickly
-
-        # Move in current direction
-        new_x = self.x + self.direction[0] * speed
-        new_y = self.y + self.direction[1] * speed
-
-        # Check wall collision for actual movement (with smaller hitbox)
-        test_rect = pygame.Rect(0, 0, 20, 20)
-        test_rect.center = (int(new_x), int(self.y))
-        can_move_x = True
-        for wall in walls:
-            if test_rect.colliderect(wall.rect):
-                can_move_x = False
-                break
-
-        test_rect.center = (int(self.x), int(new_y))
-        can_move_y = True
-        for wall in walls:
-            if test_rect.colliderect(wall.rect):
-                can_move_y = False
-                break
-
-        if can_move_x:
-            self.x = new_x
-        if can_move_y:
-            self.y = new_y
-
-        # If stuck, force a direction change
-        if not can_move_x and not can_move_y:
-            self.decision_cooldown = 0
-
-    def _can_move_direction(self, direction: Tuple[int, int],
-                            walls: pygame.sprite.Group, speed: float) -> bool:
-        """Check if ghost can move in the given direction."""
-        test_rect = pygame.Rect(0, 0, 22, 22)
-        test_rect.center = (int(self.x + direction[0] * speed * 8),
-                           int(self.y + direction[1] * speed * 8))
-
-        for wall in walls:
-            if test_rect.colliderect(wall.rect):
-                return False
-        return True
-
 
 class Pellet(pygame.sprite.Sprite):
     """A collectible pellet/dot in the maze."""
 
-    def __init__(self, x: int, y: int, image: Optional[pygame.Surface] = None,
-                 is_power_pellet: bool = False, power_pellet_image: Optional[pygame.Surface] = None):
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        image: Optional[pygame.Surface] = None,
+        is_power_pellet: bool = False,
+        power_pellet_image: Optional[pygame.Surface] = None,
+    ):
         super().__init__()
         self.is_power_pellet = is_power_pellet
         self.power_pellet_base_image = power_pellet_image
@@ -421,8 +395,12 @@ class Pellet(pygame.sprite.Sprite):
                 # Fallback to yellow circle
                 self.base_size = 16
                 self.image = pygame.Surface([self.base_size, self.base_size], pygame.SRCALPHA)
-                pygame.draw.circle(self.image, YELLOW, (self.base_size // 2, self.base_size // 2),
-                                   self.base_size // 2)
+                pygame.draw.circle(
+                    self.image,
+                    YELLOW,
+                    (self.base_size // 2, self.base_size // 2),
+                    self.base_size // 2,
+                )
                 self.base_image = None
         elif image:
             self.image = image
@@ -432,6 +410,11 @@ class Pellet(pygame.sprite.Sprite):
             pygame.draw.ellipse(self.image, YELLOW, [0, 0, 4, 4])
 
         self.rect = self.image.get_rect(center=(x, y))
+        self._pulse_frames = {}
+        if is_power_pellet:
+            source = self.base_image or self.image
+            for size in range(12, 30):
+                self._pulse_frames[size] = pygame.transform.scale(source, (size, size))
 
     def update(self):
         """Update power pellet animation (pulsing scale)."""
@@ -441,24 +424,15 @@ class Pellet(pygame.sprite.Sprite):
             scale = 1.0 + 0.2 * math.sin(self.pulse_timer * 0.1)
             old_center = self.rect.center
 
-            if self.base_image:
-                # Scale the soupbowl image
-                base_w, base_h = self.base_image.get_size()
-                new_w = int(base_w * scale)
-                new_h = int(base_h * scale)
-                self.image = pygame.transform.scale(self.base_image, (new_w, new_h))
-            else:
-                # Fallback: pulse size between 12 and 20
-                size = int(16 * scale)
-                self.image = pygame.Surface([size, size], pygame.SRCALPHA)
-                pygame.draw.circle(self.image, YELLOW, (size // 2, size // 2), size // 2)
+            base_size = self.base_image.get_width() if self.base_image else 16
+            self.image = self._pulse_frames[max(12, min(29, int(base_size * scale)))]
 
             self.rect = self.image.get_rect(center=old_center)
 
 
 class PacmanGame(BaseGame):
     """
-    Pac-Man game using AnimatedFerret for the player character.
+    Tunnel Treats game using AnimatedFerret for the player character.
 
     Features:
     - AnimatedFerret with movement animation while navigating
@@ -466,7 +440,7 @@ class PacmanGame(BaseGame):
     - Death animation on ghost collision with 1-second pause
     - AI-driven ghost behavior with different personalities
     - Power pellets that allow eating ghosts
-    - Soupcan sprites for ghosts, soupbowl for pellets
+    - Original garden critters for ghosts, soupbowl for pellets
     """
 
     # Movement speed (reduced from 30 to make game more controllable)
@@ -474,24 +448,52 @@ class PacmanGame(BaseGame):
 
     # Maze wall data: [x, y, width, height]
     WALL_DATA = [
-        [0, 0, 6, 600], [0, 0, 600, 6], [0, 600, 606, 6], [600, 0, 6, 606],
-        [300, 0, 6, 66], [60, 60, 186, 6], [360, 60, 186, 6], [60, 120, 66, 6],
-        [60, 120, 6, 126], [180, 120, 246, 6], [300, 120, 6, 66], [480, 120, 66, 6],
-        [540, 120, 6, 126], [120, 180, 126, 6], [120, 180, 6, 126], [360, 180, 126, 6],
-        [480, 180, 6, 126], [180, 240, 6, 126], [180, 360, 246, 6], [420, 240, 6, 126],
-        [240, 240, 42, 6], [324, 240, 42, 6], [240, 240, 6, 66], [240, 300, 126, 6],
-        [360, 240, 6, 66], [0, 300, 66, 6], [540, 300, 66, 6], [60, 360, 66, 6],
-        [60, 360, 6, 186], [480, 360, 66, 6], [540, 360, 6, 186], [120, 420, 366, 6],
-        [120, 420, 6, 66], [480, 420, 6, 66], [180, 480, 246, 6], [300, 480, 6, 66],
-        [120, 540, 126, 6], [360, 540, 126, 6],
+        [0, 0, 6, 600],
+        [0, 0, 600, 6],
+        [0, 600, 606, 6],
+        [600, 0, 6, 606],
+        [300, 0, 6, 66],
+        [60, 60, 186, 6],
+        [360, 60, 186, 6],
+        [60, 120, 66, 6],
+        [60, 120, 6, 126],
+        [180, 120, 246, 6],
+        [300, 120, 6, 66],
+        [480, 120, 66, 6],
+        [540, 120, 6, 126],
+        [120, 180, 126, 6],
+        [120, 180, 6, 126],
+        [360, 180, 126, 6],
+        [480, 180, 6, 126],
+        [180, 240, 6, 126],
+        [180, 360, 246, 6],
+        [420, 240, 6, 126],
+        [240, 240, 42, 6],
+        [324, 240, 42, 6],
+        [240, 240, 6, 66],
+        [240, 300, 126, 6],
+        [360, 240, 6, 66],
+        [0, 300, 66, 6],
+        [540, 300, 66, 6],
+        [60, 360, 66, 6],
+        [60, 360, 6, 186],
+        [480, 360, 66, 6],
+        [540, 360, 6, 186],
+        [120, 420, 366, 6],
+        [120, 420, 6, 66],
+        [480, 420, 6, 66],
+        [180, 480, 246, 6],
+        [300, 480, 6, 66],
+        [120, 540, 126, 6],
+        [360, 540, 126, 6],
     ]
 
     # Power pellet positions (four corners of the maze)
     POWER_PELLET_POSITIONS = [
-        (36, 66),     # Top-left
-        (564, 66),    # Top-right
-        (36, 534),    # Bottom-left
-        (564, 534),   # Bottom-right
+        (36, 66),  # Top-left
+        (564, 66),  # Top-right
+        (36, 534),  # Bottom-left
+        (564, 534),  # Bottom-right
     ]
 
     # Player starting position (center-bottom of maze)
@@ -500,10 +502,10 @@ class PacmanGame(BaseGame):
 
     # Ghost spawn positions and types
     GHOST_DATA = [
-        ('blinky', 303, 199),   # Red - direct chaser
-        ('pinky', 303, 259),    # Pink - ambusher
-        ('inky', 255, 259),     # Cyan - unpredictable
-        ('clyde', 351, 259),    # Orange - shy
+        ("blinky", 303, 273),  # Direct chaser
+        ("pinky", 303, 273),  # Ambusher
+        ("inky", 273, 273),  # Flanker
+        ("clyde", 333, 273),  # Shy pursuer
     ]
 
     # Maze colors - softer lavender cave theme
@@ -515,23 +517,23 @@ class PacmanGame(BaseGame):
     # Difficulty presets
     DIFFICULTY_PRESETS = {
         Difficulty.EASY: {
-            'ghost_speed': 1.6,           # Slower ghosts
-            'ghost_frightened_speed': 0.9,
-            'power_mode_duration': 600,   # 10 seconds power mode
+            "ghost_speed": 1.6,  # Slower ghosts
+            "ghost_frightened_speed": 0.9,
+            "power_mode_duration": 600,  # 10 seconds power mode
         },
         Difficulty.NORMAL: {
-            'ghost_speed': 2.3,           # Normal ghost speed
-            'ghost_frightened_speed': 1.2,
-            'power_mode_duration': 480,   # 8 seconds power mode
+            "ghost_speed": 2.3,  # Normal ghost speed
+            "ghost_frightened_speed": 1.2,
+            "power_mode_duration": 480,  # 8 seconds power mode
         },
         Difficulty.HARD: {
-            'ghost_speed': 3.0,           # Faster ghosts
-            'ghost_frightened_speed': 1.5,
-            'power_mode_duration': 300,   # 5 seconds power mode
+            "ghost_speed": 3.0,  # Faster ghosts
+            "ghost_frightened_speed": 1.5,
+            "power_mode_duration": 300,  # 5 seconds power mode
         },
     }
 
-    def __init__(self, screen: pygame.Surface, input_manager):
+    def __init__(self, screen: pygame.Surface, input_manager, difficulty=None):
         """Initialize the Pac-Man game."""
         # Store base directory for asset loading
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -542,7 +544,7 @@ class PacmanGame(BaseGame):
         self.high_score = 0
         self.lives = 3
         self.total_pellets = 0
-        self.state = 'playing'  # 'playing', 'dying', 'resetting'
+        self.state = "playing"  # 'playing', 'dying', 'resetting'
         self.death_timer = 0
         self.death_duration = 60  # 1 second at 60 FPS
 
@@ -561,15 +563,14 @@ class PacmanGame(BaseGame):
         # Player (AnimatedFerret)
         self.player: Optional[AnimatedFerret] = None
         self.player_dir = (1, 0)  # Current direction
-        self.queued_dir = None     # Queued direction for next valid turn
+        self.queued_dir = None  # Queued direction for next valid turn
 
         # Player position as float for smooth movement
         self.player_x = float(self.PLAYER_START_X)
         self.player_y = float(self.PLAYER_START_Y)
 
         # Assets
-        self.ghost_img: Optional[pygame.Surface] = None
-        self.ghost_frightened_img: Optional[pygame.Surface] = None
+        self.ghost_images = {}
         self.pellet_img: Optional[pygame.Surface] = None
 
         # Font for UI
@@ -577,15 +578,18 @@ class PacmanGame(BaseGame):
         self.large_font = pygame.font.Font(None, 48)
 
         # Call parent init (which calls setup)
-        super().__init__(screen, input_manager)
+        super().__init__(screen, input_manager, difficulty)
 
     def setup(self):
         """Initialize or reset the game state."""
         # Apply difficulty settings
         preset = self.DIFFICULTY_PRESETS[self.difficulty]
-        self.ghost_speed = preset['ghost_speed']
-        self.ghost_frightened_speed = preset['ghost_frightened_speed']
-        self.power_mode_duration = preset['power_mode_duration']
+        self.level = 1
+        self._deaths = 0
+        self._deaths_this_level = 0
+        self.ghost_speed = preset["ghost_speed"]
+        self.ghost_frightened_speed = preset["ghost_frightened_speed"]
+        self.power_mode_duration = preset["power_mode_duration"]
 
         # Load assets
         self._load_assets()
@@ -608,7 +612,7 @@ class PacmanGame(BaseGame):
         # Reset game state
         self.score = 0
         self.lives = 3
-        self.state = 'playing'
+        self.state = "playing"
         self.death_timer = 0
         self.power_mode = False
         self.power_timer = 0
@@ -617,25 +621,44 @@ class PacmanGame(BaseGame):
         self.queued_dir = None
         self.paused = False
         self.score_manager = get_score_manager()
-        self.high_score = self.score_manager.get_high_score('pacman')
+        self.high_score = self.score_manager.get_high_score("pacman", self.difficulty)
         self.new_high_score = False
+        self._build_render_cache()
 
     def _load_assets(self):
         """Load game assets (ghost and pellet sprites)."""
-        # Load ghost sprite (soupcan_new) - preserve aspect ratio to avoid distortion
-        self.ghost_img = self.asset_loader.load_image('soupcan_new.png', (30, 30), preserve_aspect=True)
-        if self.ghost_img is None:
-            self.ghost_img = pygame.Surface((30, 30), pygame.SRCALPHA)
-            pygame.draw.ellipse(self.ghost_img, RED, [0, 0, 30, 30])
-
-        # Frightened ghost will use the same soupcan but flashing colors (handled in Ghost class)
-        self.ghost_frightened_img = self.ghost_img.copy()
+        for name, color in (
+            ("blinky", (228, 117, 98)),
+            ("pinky", (223, 145, 201)),
+            ("inky", (103, 196, 192)),
+            ("clyde", (238, 177, 82)),
+        ):
+            image = pygame.Surface((30, 30), pygame.SRCALPHA)
+            pygame.draw.ellipse(image, color, (2, 6, 26, 22))
+            for x in (9, 21):
+                pygame.draw.circle(image, color, (x, 6), 5)
+                pygame.draw.circle(image, WHITE, (x, 15), 4)
+                pygame.draw.circle(image, (45, 35, 70), (x, 15), 2)
+            ink = (76, 49, 78)
+            if name == "blinky":
+                pygame.draw.line(image, ink, (9, 9), (14, 11), 2)
+                pygame.draw.line(image, ink, (21, 9), (16, 11), 2)
+            elif name == "pinky":
+                pygame.draw.polygon(
+                    image, ink, [(10, 2), (16, 5), (21, 2), (21, 9), (16, 6), (10, 9)]
+                )
+            elif name == "inky":
+                pygame.draw.circle(image, ink, (12, 23), 2)
+                pygame.draw.circle(image, ink, (18, 23), 2)
+            else:
+                pygame.draw.lines(image, ink, False, [(10, 22), (15, 25), (20, 22)], 2)
+            self.ghost_images[name] = image
 
         # Load pellet sprite (soupbowl, sized for visibility)
-        self.pellet_img = self.asset_loader.load_image('soupbowl.png', (12, 12))
+        self.pellet_img = self.asset_loader.load_image("soupbowl.png", (12, 12))
 
         # Load power pellet sprite (larger soupbowl)
-        self.power_pellet_img = self.asset_loader.load_image('soupbowl.png', (24, 24))
+        self.power_pellet_img = self.asset_loader.load_image("soupbowl.png", (24, 24))
 
     def _create_maze(self):
         """Create the maze walls and ghost gate."""
@@ -644,13 +667,15 @@ class PacmanGame(BaseGame):
 
         # Create walls
         for wall_data in self.WALL_DATA:
-            wall = Wall(wall_data[0], wall_data[1], wall_data[2], wall_data[3],
-                        self.MAZE_WALL_COLOR)
+            wall = Wall(
+                wall_data[0], wall_data[1], wall_data[2], wall_data[3], self.MAZE_WALL_COLOR
+            )
             self.walls.add(wall)
 
         # Create ghost gate (thin white bar)
         gate = Wall(282, 242, 42, 2, WHITE)
         self.gate.add(gate)
+        self.routes = MazeRoutes(self.walls, self.gate)
 
     def _create_player(self):
         """Create the player character using AnimatedFerret."""
@@ -674,19 +699,20 @@ class PacmanGame(BaseGame):
 
         # Spawn delays in frames (60fps): Blinky starts immediately, others follow
         spawn_delays = {
-            'blinky': 0,      # Starts immediately - always chasing
-            'pinky': 90,      # 1.5 seconds
-            'inky': 180,      # 3 seconds
-            'clyde': 270,     # 4.5 seconds
+            "blinky": 0,  # Starts immediately - always chasing
+            "pinky": 90,  # 1.5 seconds
+            "inky": 180,  # 3 seconds
+            "clyde": 270,  # 4.5 seconds
         }
 
         for ghost_type, x, y in self.GHOST_DATA:
             ghost = Ghost(
-                x=x, y=y,
-                normal_image=self.ghost_img,
-                frightened_image=self.ghost_frightened_img,
+                x=x,
+                y=y,
+                normal_image=self.ghost_images[ghost_type],
+                frightened_image=self.ghost_images[ghost_type],
                 ghost_type=ghost_type,
-                spawn_pos=(x, y)
+                spawn_pos=(x, y),
             )
             # Apply difficulty-based speeds (override class defaults)
             ghost.NORMAL_SPEED = self.ghost_speed
@@ -696,11 +722,13 @@ class PacmanGame(BaseGame):
             ghost.CRUISE_ELROY_SPEED = 2.7 * speed_ratio
             ghost.CRUISE_ELROY2_SPEED = 3.0 * speed_ratio
             # Set spawn delay based on ghost type
-            ghost.spawn_delay = spawn_delays.get(ghost_type, 60)
+            ghost.routes = self.routes
+            ghost.spawn_delay = spawn_delays[ghost_type]
             # Blinky starts outside the pen, others inside
-            if ghost_type == 'blinky':
+            if ghost_type == "blinky":
                 ghost.in_spawn = False
-                ghost.y = 200  # Start in the corridor above the ghost box
+                ghost.x, ghost.y = PEN_EXIT
+                ghost.rect.center = PEN_EXIT
                 ghost.direction = (-1, 0)  # Start moving left
             self.ghosts.append(ghost)
 
@@ -710,12 +738,7 @@ class PacmanGame(BaseGame):
         self.power_pellets.empty()
 
         # Create a temporary player rect for collision check
-        player_rect = pygame.Rect(
-            self.PLAYER_START_X - 15,
-            self.PLAYER_START_Y - 15,
-            30,
-            30
-        )
+        player_rect = pygame.Rect(self.PLAYER_START_X - 15, self.PLAYER_START_Y - 15, 30, 30)
 
         # Grid-based pellet placement
         for row in range(19):
@@ -757,9 +780,11 @@ class PacmanGame(BaseGame):
         self.player_y = float(self.PLAYER_START_Y)
         self.player.x = self.player_x
         self.player.y = self.player_y
-        self.player.set_state('idle')
+        self.player.set_state("idle")
         self.player_dir = (0, 0)
         self.queued_dir = None
+
+        self.death_timer = 0
 
         # Reset ghosts
         self._create_ghosts()
@@ -769,14 +794,21 @@ class PacmanGame(BaseGame):
         self.power_timer = 0
         self.ghost_eat_combo = 0
 
-        self.state = 'playing'
+        self.state = "playing"
 
     def _reset_level(self):
-        """Reset the entire level (all pellets, positions, score)."""
+        """Populate a new board while preserving the run's score and lives."""
         self._reset_positions()
         self._create_pellets()
         self.total_pellets = len(self.pellets) + len(self.power_pellets)
-        self.score = 0
+
+    def _next_level(self):
+        self.level += 1
+        preset = self.DIFFICULTY_PRESETS[self.difficulty]
+        self.ghost_speed = preset["ghost_speed"] * min(1.6, 1 + 0.08 * (self.level - 1))
+        self.power_mode_duration = max(120, preset["power_mode_duration"] - 30 * (self.level - 1))
+        self._deaths_this_level = 0
+        self._reset_level()
 
     def handle_input(self) -> bool:
         """Process player input. Returns True to exit to menu."""
@@ -787,8 +819,14 @@ class PacmanGame(BaseGame):
         if self.input_manager.back_pressed():
             return True
 
+        if self.state == "game_over":
+            if self.input_manager.confirm_pressed():
+                self.restart_session()
+                self.setup()
+            return False
+
         # Check for pause toggle
-        if self.input_manager.pause_pressed() and self.state == 'playing':
+        if self.input_manager.pause_pressed() and self.state == "playing":
             self.paused = not self.paused
             return False
 
@@ -797,24 +835,20 @@ class PacmanGame(BaseGame):
             return False
 
         # Don't process movement input during death animation
-        if self.state != 'playing':
+        if self.state != "playing":
             return False
 
         # Get D-pad direction
         dp = self.input_manager.get_dpad()
 
-        # Handle keyboard input
-        keys = pygame.key.get_pressed()
-
-        # Combine keyboard and gamepad input
         new_dir = None
-        if dp[0] == -1 or keys[pygame.K_LEFT]:
+        if dp[0] == -1:
             new_dir = (-1, 0)
-        elif dp[0] == 1 or keys[pygame.K_RIGHT]:
+        elif dp[0] == 1:
             new_dir = (1, 0)
-        elif dp[1] == -1 or keys[pygame.K_UP]:
+        elif dp[1] == -1:
             new_dir = (0, -1)
-        elif dp[1] == 1 or keys[pygame.K_DOWN]:
+        elif dp[1] == 1:
             new_dir = (0, 1)
 
         if new_dir:
@@ -855,7 +889,13 @@ class PacmanGame(BaseGame):
         if self.paused:
             return
 
-        if self.state == 'dying':
+        if self.state == "level_complete":
+            self.level_timer -= 1
+            if self.level_timer <= 0:
+                self._next_level()
+            return
+
+        if self.state == "dying":
             # Update death animation
             self.death_timer += 1
 
@@ -865,26 +905,23 @@ class PacmanGame(BaseGame):
 
             if self.death_timer >= self.death_duration:
                 self.lives -= 1
-                self._deaths_this_level = getattr(self, '_deaths_this_level', 0) + 1
+                self._deaths_this_level = getattr(self, "_deaths_this_level", 0) + 1
                 if self.lives <= 0:
                     # Game over - check and save high score
-                    if self.score_manager.set_high_score('pacman', self.score):
+                    if self.score_manager.set_high_score("pacman", self.score, self.difficulty):
                         self.new_high_score = True
                         self.high_score = self.score
                     # Check achievements
                     if self.score >= 1000:
-                        self.achievements.unlock('pacman_1000')
+                        self.achievements.unlock("pacman_1000")
                     # Track statistics
-                    self.stats.increment('pacman', 'games_played')
-                    self.stats.add('pacman', 'total_score', self.score)
-                    self.stats.increment('global', 'games_started')
-                    self._reset_level()
-                    self.lives = 3
+                    self._finalize_game_statistics()
+                    self.state = "game_over"
                 else:
                     self._reset_positions()
             return
 
-        if self.state != 'playing':
+        if self.state != "playing":
             return
 
         # Update power mode timer
@@ -893,10 +930,6 @@ class PacmanGame(BaseGame):
             if self.power_timer <= 0:
                 self.power_mode = False
                 self.ghost_eat_combo = 0
-                # Reset ghost modes
-                for ghost in self.ghosts:
-                    if ghost.mode == Ghost.MODE_FRIGHTENED:
-                        ghost.mode = Ghost.MODE_CHASE
 
         # Try to apply queued direction
         if self.queued_dir and self._can_move(self.queued_dir):
@@ -932,11 +965,11 @@ class PacmanGame(BaseGame):
 
         # Update player animation
         if self.player_dir != (0, 0):
-            if self.player.state != 'movement':
-                self.player.set_state('movement')
+            if self.player.state != "movement":
+                self.player.set_state("movement")
         else:
-            if self.player.state != 'idle':
-                self.player.set_state('idle')
+            if self.player.state != "idle":
+                self.player.set_state("idle")
         self.player._advance_animation()
 
         # Update ghosts with AI
@@ -944,7 +977,7 @@ class PacmanGame(BaseGame):
         pellets_remaining = len(self.pellets) + len(self.power_pellets)
 
         for ghost in self.ghosts:
-            if ghost.ghost_type == 'blinky':
+            if ghost.ghost_type == "blinky":
                 blinky_pos = (ghost.x, ghost.y)
                 # Cruise Elroy mode - Blinky gets faster as pellets decrease
                 if pellets_remaining <= 10:
@@ -956,8 +989,13 @@ class PacmanGame(BaseGame):
                 break
 
         for ghost in self.ghosts:
-            ghost.update(self.walls, (self.player_x, self.player_y),
-                         self.player_dir, blinky_pos)
+            ghost.update(
+                self.walls,
+                (self.player_x, self.player_y),
+                self.player_dir,
+                blinky_pos,
+                power_ticks=self.power_timer,
+            )
 
         # Update power pellet animation
         for pellet in self.power_pellets:
@@ -970,19 +1008,21 @@ class PacmanGame(BaseGame):
             if player_rect.colliderect(pellet.rect):
                 self.pellets.remove(pellet)
                 self.score += 10
-                # No sound for regular pellets - only soup bowls make sound
+                self.audio.play_sound(AudioManager.SOUND_PELLET)
 
         # Check power pellet collection
         for pellet in list(self.power_pellets):
             if player_rect.colliderect(pellet.rect):
                 self.power_pellets.remove(pellet)
                 self.score += 50
-                self.audio.play_sound(AudioManager.SOUND_COLLECT)
+                self.audio.play_sound(AudioManager.SOUND_POWERUP)
                 self._activate_power_mode()
 
         # Check ghost collision
+        collision_rect = pygame.Rect(0, 0, 20, 20)
+        collision_rect.center = (round(self.player_x), round(self.player_y))
         for ghost in self.ghosts:
-            if player_rect.colliderect(ghost.rect):
+            if not ghost.in_spawn and collision_rect.colliderect(ghost.rect.inflate(-6, -6)):
                 if ghost.mode == Ghost.MODE_FRIGHTENED:
                     # Eat the ghost!
                     self.ghost_eat_combo += 1
@@ -993,27 +1033,34 @@ class PacmanGame(BaseGame):
                     self.audio.play_sound(AudioManager.SOUND_COLLECT)
                     # Check for 4 ghosts eaten achievement
                     if self.ghost_eat_combo >= 4:
-                        self.achievements.unlock('pacman_ghost')
+                        self.achievements.unlock("pacman_ghost")
                     # Track ghost eaten stat
-                    self.stats.increment('pacman', 'ghosts_eaten')
+                    self.stats.increment("pacman", "ghosts_eaten")
                 elif ghost.mode != Ghost.MODE_EATEN:
                     # Player dies
                     self._start_death()
                     return
+
+        if self.score >= 1000:
+            self.achievements.unlock("pacman_1000")
 
         # Check win condition (all pellets eaten)
         if len(self.pellets) == 0 and len(self.power_pellets) == 0:
             self.high_score = max(self.high_score, self.score)
             self.audio.play_sound(AudioManager.SOUND_VICTORY)
             # Check achievements
-            self.achievements.unlock('pacman_first')
-            if getattr(self, '_deaths_this_level', 0) == 0:
-                self.achievements.unlock('pacman_no_death')
+            self.achievements.unlock("pacman_first")
+            if getattr(self, "_deaths_this_level", 0) == 0:
+                self.achievements.unlock("pacman_no_death")
             # Track statistics
-            self.stats.increment('pacman', 'levels_cleared')
-            self.stats.increment('global', 'games_completed')
-            self._deaths_this_level = 0  # Reset for next level
-            self._reset_level()
+            self.stats.increment("pacman", "levels_cleared")
+            self.stats.increment("global", "games_completed")
+            self.new_high_score = (
+                self.score_manager.set_high_score("pacman", self.score, self.difficulty)
+                or self.new_high_score
+            )
+            self.state = "level_complete"
+            self.level_timer = 90
 
     def _activate_power_mode(self):
         """Activate power mode - ghosts become vulnerable."""
@@ -1026,125 +1073,82 @@ class PacmanGame(BaseGame):
 
     def _start_death(self):
         """Start the death animation sequence."""
-        self.state = 'dying'
+        if self.state != "playing":
+            return
+        self._deaths += 1
+        self.state = "dying"
         self.death_timer = 0
-        self.player.set_state('death')
+        self.player.set_state("death")
         self.player_dir = (0, 0)
         self.audio.play_sound(AudioManager.SOUND_DEATH)
 
-    def render(self):
-        """Draw the game state to the screen."""
-        # Draw cute cave background with gradient
-        self.screen.fill(CAVE_BG_DARK)
+    def _record_game_statistics(self):
+        self.stats.increment("pacman", "deaths", self._deaths)
+        self.stats.add("pacman", "total_score", self.score)
 
-        # Draw subtle twinkling stars in the background
-        if not hasattr(self, '_star_timer'):
-            self._star_timer = 0
-            # Generate static star positions
-            self._bg_stars = []
-            for _ in range(30):
-                sx = random.randint(10, WINDOW_WIDTH - 10)
-                sy = random.randint(10, WINDOW_HEIGHT - 10)
-                ss = random.randint(1, 3)
-                sp = random.uniform(0, 6.28)  # Phase offset
-                self._bg_stars.append((sx, sy, ss, sp))
-
-        self._star_timer += 1
-        for sx, sy, ss, sp in self._bg_stars:
-            # Twinkling effect
-            twinkle = abs(math.sin(self._star_timer * 0.05 + sp))
-            alpha = int(50 + twinkle * 80)
-            star_surf = pygame.Surface((ss * 2 + 2, ss * 2 + 2), pygame.SRCALPHA)
-            pygame.draw.circle(star_surf, (255, 255, 220, alpha), (ss + 1, ss + 1), ss)
-            self.screen.blit(star_surf, (sx - ss - 1, sy - ss - 1))
-
-        # Draw walls with soft glow effect
+    def _build_render_cache(self):
+        """Bake wall glows and cave stars once; share collectible effects."""
+        self._cave_background = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+        self._cave_background.fill(CAVE_BG_DARK)
+        rng = random.Random(42)
+        for _ in range(30):
+            pygame.draw.circle(
+                self._cave_background,
+                (100, 95, 110),
+                (rng.randrange(10, WINDOW_WIDTH - 10), rng.randrange(10, WINDOW_HEIGHT - 10)),
+                rng.randrange(1, 4),
+            )
+        glow_layer = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
         for wall in self.walls:
-            # Draw subtle glow behind wall
-            glow_rect = wall.rect.inflate(4, 4)
-            glow_surf = pygame.Surface((glow_rect.width, glow_rect.height), pygame.SRCALPHA)
-            pygame.draw.rect(glow_surf, (*CAVE_WALL_GLOW, 40), glow_surf.get_rect(), border_radius=2)
-            self.screen.blit(glow_surf, glow_rect.topleft)
-        self.walls.draw(self.screen)
+            pygame.draw.rect(
+                glow_layer, (*CAVE_WALL_GLOW, 40), wall.rect.inflate(4, 4), border_radius=2
+            )
+        self._cave_background.blit(glow_layer, (0, 0))
+        self.walls.draw(self._cave_background)
+        self.gate.draw(self._cave_background)
+        self._pellet_glow = pygame.Surface((12, 12), pygame.SRCALPHA)
+        pygame.draw.circle(self._pellet_glow, (*PELLET_GLOW, 60), (6, 6), 6)
+        self._power_glow = pygame.Surface((56, 56), pygame.SRCALPHA)
+        pygame.draw.circle(self._power_glow, (*POWER_PELLET_GLOW, 110), (28, 28), 27)
+        self._ghost_glow = pygame.Surface((40, 40), pygame.SRCALPHA)
+        pygame.draw.circle(self._ghost_glow, (100, 100, 255, 60), (20, 20), 18)
 
-        # Draw gate with subtle glow
-        self.gate.draw(self.screen)
-
-        # Draw pellets with subtle glow effect
+    def render(self):
+        """Draw cached artwork and current actors without per-pellet allocations."""
+        self.screen.blit(self._cave_background, (0, 0))
         for pellet in self.pellets:
-            glow_surf = pygame.Surface((12, 12), pygame.SRCALPHA)
-            pygame.draw.circle(glow_surf, (*PELLET_GLOW, 60), (6, 6), 6)
-            self.screen.blit(glow_surf, (pellet.rect.centerx - 6, pellet.rect.centery - 6))
+            self.screen.blit(self._pellet_glow, (pellet.rect.centerx - 6, pellet.rect.centery - 6))
         self.pellets.draw(self.screen)
-
-        # Draw power pellets with stronger glow
         for pellet in self.power_pellets:
-            pulse = abs(math.sin(self._star_timer * 0.1)) * 0.5 + 0.5
-            glow_size = int(20 + pulse * 8)
-            glow_surf = pygame.Surface((glow_size * 2, glow_size * 2), pygame.SRCALPHA)
-            pygame.draw.circle(glow_surf, (*POWER_PELLET_GLOW, int(80 + pulse * 40)), (glow_size, glow_size), glow_size)
-            self.screen.blit(glow_surf, (pellet.rect.centerx - glow_size, pellet.rect.centery - glow_size))
+            self.screen.blit(self._power_glow, (pellet.rect.centerx - 28, pellet.rect.centery - 28))
         self.power_pellets.draw(self.screen)
-
-        # Draw player
         self.player.draw(self.screen)
-
-        # Draw ghosts with subtle glow when frightened
         for ghost in self.ghosts:
             if ghost.mode == Ghost.MODE_FRIGHTENED:
-                glow_surf = pygame.Surface((40, 40), pygame.SRCALPHA)
-                pygame.draw.circle(glow_surf, (100, 100, 255, 60), (20, 20), 18)
-                self.screen.blit(glow_surf, (ghost.rect.centerx - 20, ghost.rect.centery - 20))
+                self.screen.blit(
+                    self._ghost_glow, (ghost.rect.centerx - 20, ghost.rect.centery - 20)
+                )
             self.screen.blit(ghost.image, ghost.rect)
 
-        # Draw UI with shadow for readability
-        pellets_left = len(self.pellets) + len(self.power_pellets)
-        score_text = f"Score: {self.score}  High: {self.high_score}  Lives: {self.lives}  [B] Menu"
-        shadow_surface = self.font.render(score_text, True, (40, 30, 60))
-        self.screen.blit(shadow_surface, (11, 11))
-        text_surface = self.font.render(score_text, True, WHITE)
-        self.screen.blit(text_surface, (10, 10))
-
-        # Show power mode indicator with glow
+        labels = [
+            "Tunnel Treats",
+            f"Level: {self.level}",
+            f"Score: {self.score}",
+            f"High: {self.high_score}",
+            f"Lives: {self.lives}",
+            f"Treats: {len(self.pellets) + len(self.power_pellets)}",
+            "P / Start: pause",
+            "B / Esc: menu",
+        ]
         if self.power_mode:
-            remaining = self.power_timer / 60  # seconds
-            power_text = f"POWER: {remaining:.1f}s"
-            power_surface = self.font.render(power_text, True, (255, 200, 255))
-            self.screen.blit(power_surface, (WINDOW_WIDTH - 130, 10))
-
-        # Show pause overlay
+            labels.append(f"POWER: {self.power_timer / 60:.1f}s")
+        for row, label in enumerate(labels):
+            self.screen.blit(self.font.render(label, True, WHITE), (615, 25 + row * 32))
         if self.paused:
             self._draw_pause_overlay()
-
-        # Show death message during death animation
-        if self.state == 'dying':
-            if self.lives <= 1 and self.new_high_score:
-                # Show new high score message on final death
-                hs_text = self.large_font.render("NEW HIGH SCORE!", True, (255, 215, 0))
-                hs_rect = hs_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - 30))
-                self.screen.blit(hs_text, hs_rect)
-                death_text = self.large_font.render("GAME OVER", True, (255, 150, 150))
-                text_rect = death_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 + 20))
-                self.screen.blit(death_text, text_rect)
-            else:
-                death_text = self.large_font.render("CAUGHT!", True, (255, 150, 150))
-                text_rect = death_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2))
-                self.screen.blit(death_text, text_rect)
-
-
-def run_pacman(screen: pygame.Surface) -> None:
-    """
-    Entry point for running Pac-Man from the game launcher.
-
-    Args:
-        screen: The pygame display surface to render to.
-    """
-    # Import InputManager here to avoid circular imports
-    from engine import InputManager
-
-    # Create input manager
-    input_manager = InputManager()
-
-    # Create and run the game
-    game = PacmanGame(screen, input_manager)
-    game.run()
+        elif self.state == "game_over":
+            self._draw_game_over_overlay(score=self.score)
+        elif self.state in ("dying", "level_complete"):
+            label = "CAUGHT!" if self.state == "dying" else f"LEVEL {self.level} COMPLETE!"
+            text = self.large_font.render(label, True, (255, 200, 220))
+            self.screen.blit(text, text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2)))

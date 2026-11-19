@@ -1,0 +1,29 @@
+{
+  "Snake": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.124
+  },
+  "Tunnel Treats": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.363
+  },
+  "Ferret Crossing": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.586
+  },
+  "Burrow Defender": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.252
+  },
+  "Crystal Quest": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.251
+  },
+  "Rocky Burrow": {
+    "explicit_surfaces_per_render": 0,
+    "median_render_ms": 0.73
+  },
+  "Main menu": {
+    "explicit_surfaces_per_render": 0
+  }
+}

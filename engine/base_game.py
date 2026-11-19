@@ -1,228 +1,323 @@
-"""Abstract base class for all games in the Weasel Entertainment System."""
+"""Shared fixed-step game loop, session bookkeeping, and cached overlays."""
 
 from abc import ABC, abstractmethod
 import pygame
-import sys
-from typing import Optional
-
-from engine.audio_manager import get_audio_manager
+import engine
+from engine.audio_manager import AudioManager, get_audio_manager
 from engine.achievements import get_achievement_manager
 from engine.stats_manager import get_stats_manager
+from engine.score_manager import get_score_manager
 from engine.game_states import Difficulty
-import engine
+from engine.persistence import persistence_session
+
+ACHIEVEMENT_DISPLAY_DURATION = 180
 
 
-# Achievement notification display duration (frames at 60 FPS)
-ACHIEVEMENT_DISPLAY_DURATION = 180  # 3 seconds
+class AchievementToast:
+    """Reusable notification renderer for the launcher and every game."""
+
+    def __init__(self, manager=None):
+        self.manager = manager or get_achievement_manager()
+        self.notification = None
+        self.timer = 0
+        self.surface = None
+        self.title_font = pygame.font.Font(None, 28)
+        self.name_font = pygame.font.Font(None, 22)
+
+    def update(self, dt=1 / 60):
+        self.timer = max(0, self.timer - dt)
+        if self.timer == 0:
+            self.notification = None
+        if self.notification is None and self.manager.has_notification():
+            self.notification = self.manager.pop_notification()
+            get_audio_manager().play_sound(AudioManager.SOUND_ACHIEVEMENT)
+            self.timer = 3.0
+            self.surface = pygame.Surface((340, 70), pygame.SRCALPHA)
+            self.surface.fill((65, 52, 30, 235))
+            pygame.draw.rect(
+                self.surface, (255, 215, 0), self.surface.get_rect(), 3, border_radius=8
+            )
+            self.surface.blit(
+                self.title_font.render("Achievement unlocked!", True, (255, 215, 0)), (14, 10)
+            )
+            self.surface.blit(
+                self.name_font.render(self.notification["name"], True, (255, 255, 255)), (14, 38)
+            )
+
+    def draw(self, screen):
+        if self.notification is None:
+            return
+        slide = min(1.0, (3.0 - self.timer) / 0.3, self.timer / 0.3)
+        screen.blit(self.surface, ((screen.get_width() - 340) // 2, int(-70 + 80 * slide)))
 
 
 class BaseGame(ABC):
-    """Abstract base class that enforces a consistent game loop pattern.
+    """Game logic advances at FPS even when the display is slower.
 
-    All games should inherit from this class and implement the abstract methods.
+    Input handlers own the input snapshot; the loop calls them once per logic
+    step. Catch-up is bounded to 250 ms to avoid huge jumps after a stall.
     """
 
-    def __init__(self, screen, input_manager, difficulty: Optional[Difficulty] = None):
-        """Initialize the game with screen and input manager references.
-
-        Args:
-            screen: The pygame display surface to render to.
-            input_manager: The InputManager instance for handling input.
-            difficulty: The difficulty level (defaults to NORMAL if not specified).
-        """
+    def __init__(self, screen, input_manager, difficulty=None):
         self.screen = screen
         self.input_manager = input_manager
         self.difficulty = difficulty if difficulty is not None else Difficulty.NORMAL
+        self.demo_mode = bool(getattr(input_manager, "demo_mode", False))
+        self.game_key = type(self).__module__.rsplit(".", 1)[-1]
         self.clock = pygame.time.Clock()
         self.audio = get_audio_manager()
         self.achievements = get_achievement_manager()
         self.stats = get_stats_manager()
-        self._achievement_notification = None
-        self._notification_timer = 0
-        self._session_start_time = pygame.time.get_ticks()
-        self.setup()
+        self._toast = AchievementToast(self.achievements)
+        self._overlay_cache = {}
+        self._session_closed = False
+        self._window_focused = True
+        self._focus_paused = False
+        self._accumulator = 0.0
+        self.quit_requested = False
+        self._audio_suspended = False
+        with persistence_session(demo=self.demo_mode, difficulty=self.difficulty):
+            self.setup()
+            self._start_session()
 
     @abstractmethod
     def setup(self):
-        """Initialize game-specific state.
-
-        Called automatically at the end of __init__.
-        Override this to set up game objects, load assets, reset scores, etc.
-        """
         pass
 
     @abstractmethod
     def handle_input(self):
-        """Process player input.
-
-        Returns:
-            bool: True to exit to menu, False to continue running.
-        """
-        pass
+        """Update input and return True to leave the game."""
 
     @abstractmethod
     def update(self, dt):
-        """Update game logic.
-
-        Args:
-            dt: Delta time in seconds since the last frame.
-        """
         pass
 
     @abstractmethod
     def render(self):
-        """Draw the game state to the screen.
-
-        Do not call pygame.display.flip() here - the run() method handles that.
-        """
         pass
 
-    def _draw_pause_overlay(self):
-        """Draw a semi-transparent pause overlay with 'PAUSED' text.
+    def _start_session(self):
+        self._session_closed = False
+        self._game_statistics_recorded = False
+        self.play_ticks = 0
+        self.new_clear_record = False
+        self.stats.increment("global", "games_started")
+        self.stats.increment(self.game_key, "games_played")
+        self.stats.save()
 
-        Call this from render() when the game is paused.
+    def restart_session(self):
+        """Finish the old run and start accounting for a player-requested restart."""
+        with persistence_session(demo=self.demo_mode, difficulty=self.difficulty):
+            self._track_session_stats()
+            self.new_high_score = False
+            self._start_session()
+        self.audio.play_sound(AudioManager.SOUND_START)
+
+    def _save_current_score(self):
+        if hasattr(self, "score"):
+            changed = get_score_manager().set_high_score(self.game_key, self.score, self.difficulty)
+            if changed:
+                self.new_high_score = True
+            if hasattr(self, "high_score"):
+                self.high_score = get_score_manager().get_high_score(self.game_key, self.difficulty)
+
+    def _record_game_statistics(self):
+        """Record this run's cumulative game-specific totals.
+
+        Games override this hook instead of writing those totals in several
+        terminal/exit paths. Event counters already saved during play stay out
+        of this hook.
         """
-        # Semi-transparent dark overlay
-        overlay = pygame.Surface((self.screen.get_width(), self.screen.get_height()))
-        overlay.set_alpha(128)
-        overlay.fill((0, 0, 0))
-        self.screen.blit(overlay, (0, 0))
 
-        # "PAUSED" text
-        font = pygame.font.Font(None, 72)
-        text = font.render("PAUSED", True, (255, 255, 255))
-        text_rect = text.get_rect(center=(self.screen.get_width() // 2,
-                                          self.screen.get_height() // 2 - 30))
-        self.screen.blit(text, text_rect)
-
-        # Instructions
-        small_font = pygame.font.Font(None, 36)
-        hint = small_font.render("Press P or Start to resume", True, (200, 200, 200))
-        hint_rect = hint.get_rect(center=(self.screen.get_width() // 2,
-                                          self.screen.get_height() // 2 + 30))
-        self.screen.blit(hint, hint_rect)
-
-    def _update_achievement_notification(self):
-        """Update achievement notification timer and check for new notifications."""
-        # Decrease timer for current notification
-        if self._notification_timer > 0:
-            self._notification_timer -= 1
-            if self._notification_timer <= 0:
-                self._achievement_notification = None
-
-        # Check for new notifications if none is currently displayed
-        if self._achievement_notification is None and self.achievements.has_notification():
-            self._achievement_notification = self.achievements.pop_notification()
-            self._notification_timer = ACHIEVEMENT_DISPLAY_DURATION
-
-    def _draw_achievement_notification(self):
-        """Draw achievement notification toast at top of screen.
-
-        Call this at the end of render() to show achievement pop-ups.
-        """
-        if self._achievement_notification is None:
+    def _finalize_game_statistics(self):
+        """Commit pending run totals once, including an early return to menu."""
+        if self._game_statistics_recorded:
             return
-
-        # Calculate slide-in/slide-out animation
-        progress = self._notification_timer / ACHIEVEMENT_DISPLAY_DURATION
-        if progress > 0.9:
-            # Slide in (first 10%)
-            slide = 1.0 - ((progress - 0.9) / 0.1)
-        elif progress < 0.1:
-            # Slide out (last 10%)
-            slide = progress / 0.1
-        else:
-            slide = 1.0
-
-        # Toast dimensions and position
-        toast_width = 320
-        toast_height = 70
-        toast_x = (self.screen.get_width() - toast_width) // 2
-        toast_y = int(-toast_height + (toast_height + 10) * slide)
-
-        # Draw toast background with rounded corners effect
-        toast_surf = pygame.Surface((toast_width, toast_height), pygame.SRCALPHA)
-
-        # Gold gradient background
-        for y in range(toast_height):
-            alpha = 220
-            r = 60 + int(20 * (y / toast_height))
-            g = 50 + int(15 * (y / toast_height))
-            b = 30
-            pygame.draw.line(toast_surf, (r, g, b, alpha), (0, y), (toast_width, y))
-
-        # Gold border
-        pygame.draw.rect(toast_surf, (255, 215, 0), (0, 0, toast_width, toast_height), 3)
-
-        # Trophy icon (simple star)
-        star_x, star_y = 25, toast_height // 2
-        star_color = (255, 215, 0)
-        points = []
-        import math
-        for i in range(5):
-            angle = math.radians(i * 72 - 90)
-            points.append((star_x + 15 * math.cos(angle), star_y + 15 * math.sin(angle)))
-            angle = math.radians(i * 72 - 90 + 36)
-            points.append((star_x + 7 * math.cos(angle), star_y + 7 * math.sin(angle)))
-        pygame.draw.polygon(toast_surf, star_color, points)
-
-        # Achievement text
-        title_font = pygame.font.Font(None, 28)
-        desc_font = pygame.font.Font(None, 22)
-
-        title_text = title_font.render("Achievement Unlocked!", True, (255, 215, 0))
-        toast_surf.blit(title_text, (50, 10))
-
-        name_text = desc_font.render(self._achievement_notification["name"], True, (255, 255, 255))
-        toast_surf.blit(name_text, (50, 35))
-
-        # Blit to screen
-        self.screen.blit(toast_surf, (toast_x, toast_y))
+        with persistence_session(demo=self.demo_mode, difficulty=self.difficulty):
+            self._record_game_statistics()
+        self._game_statistics_recorded = True
 
     def _track_session_stats(self):
-        """Track play time when game session ends. Called automatically by run()."""
-        session_time = (pygame.time.get_ticks() - self._session_start_time) / 1000.0
-        self.stats.add('global', 'total_play_time', session_time)
+        if self._session_closed:
+            return
+        with persistence_session(demo=self.demo_mode, difficulty=self.difficulty):
+            self._save_current_score()
+            self._finalize_game_statistics()
+            self.stats.add("global", "total_play_time", self.play_ticks / engine.FPS)
+            self.stats.save()
+            self.achievements.check_global_achievements(self.stats)
+        self._session_closed = True
+
+    def _overlay(self, title, detail, hint):
+        key = (self.screen.get_size(), title, detail, hint)
+        if key not in self._overlay_cache:
+            overlay = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 170))
+            lines = detail if isinstance(detail, tuple) else (detail,)
+            for text, size, y, color in (
+                (title, 64, -55, (255, 245, 210)),
+                *((line, 32, 5 + i * 37, (255, 255, 255)) for i, line in enumerate(lines)),
+                (hint, 28, 65 + (len(lines) - 1) * 37, (220, 220, 220)),
+            ):
+                image = pygame.font.Font(None, size).render(text, True, color)
+                overlay.blit(
+                    image,
+                    image.get_rect(
+                        center=(overlay.get_width() // 2, overlay.get_height() // 2 + y)
+                    ),
+                )
+            if len(self._overlay_cache) >= 12:
+                self._overlay_cache.clear()
+            self._overlay_cache[key] = overlay
+        self.screen.blit(self._overlay_cache[key], (0, 0))
+
+    def _draw_pause_overlay(self):
+        self._overlay("PAUSED", "", "P / Start: resume    B / Esc: menu")
+
+    def _draw_game_over_overlay(
+        self, title="GAME OVER", score=None, hint="A / Enter: restart    B / Esc: menu"
+    ):
+        score = getattr(self, "score", 0) if score is None else score
+        self._overlay(title, f"Score: {score}", hint)
+
+    def _record_campaign_clear(self):
+        self.new_clear_record = self.stats.record_clear(
+            self.game_key, self.difficulty, self.play_ticks
+        )
+
+    def _campaign_result(self):
+        best = self.stats.best_clear(self.game_key, self.difficulty)
+        label = "New best" if self.new_clear_record else "Best"
+        return (
+            f"Score {self.score:,}   |   Lives left {self.lives}",
+            f"Clear {self.stats.format_clear(self.play_ticks)}   |   {label} {self.stats.format_clear(best)}",
+        )
+
+    def _terminal(self):
+        return any(
+            getattr(self, flag, False) for flag in ("game_over", "game_won", "won")
+        ) or getattr(self, "state", None) in ("GAMEOVER", "game_over")
+
+    def _playing(self):
+        return not (
+            self._terminal()
+            or getattr(self, "state", None) in ("START", "dying", "level_complete")
+            or any(
+                getattr(self, flag, False)
+                for flag in (
+                    "paused",
+                    "waiting_for_input",
+                    "level_complete",
+                    "playing_death",
+                    "death_timer",
+                    "is_dying",
+                    "is_respawning",
+                )
+            )
+        )
+
+    def _set_window_focus(self, focused):
+        self._window_focused = focused
+        self._accumulator = 0.0
+        self.input_manager.discard_pending()
+        waiting = (
+            getattr(self, "waiting_for_input", False) or getattr(self, "state", None) == "START"
+        )
+        if (
+            not focused
+            and not waiting
+            and not self._terminal()
+            and not getattr(self, "paused", False)
+        ):
+            self._focus_paused = True
+        if not self.demo_mode:
+            self._sync_game_audio(bool(getattr(self, "paused", False)))
+
+    def _update_achievement_notification(self):
+        if not self.demo_mode:
+            self._toast.update(1 / engine.FPS)
+
+    def _draw_achievement_notification(self):
+        if not self.demo_mode:
+            self._toast.draw(self.screen)
+
+    def advance(self, elapsed):
+        """Advance bounded real elapsed time; useful for the launcher and tests."""
+        if not self._window_focused:
+            return False
+        if self._focus_paused:
+            self.input_manager.update()
+            if self.input_manager.back_pressed():
+                return True
+            if self.input_manager.pause_pressed():
+                self._focus_paused = False
+                if not self.demo_mode:
+                    self._sync_game_audio(False)
+            return False
+        self._accumulator += max(0.0, min(float(elapsed), 0.25))
+        step = 1 / engine.FPS
+        with persistence_session(demo=self.demo_mode, difficulty=self.difficulty):
+            while self._accumulator + 1e-9 >= step:
+                self._accumulator -= step
+                was_paused = bool(getattr(self, "paused", False))
+                if self.handle_input():
+                    return True
+                if self._playing():
+                    self.play_ticks += 1
+                self.update(step)
+                if not self.demo_mode:
+                    self._sync_game_audio(was_paused)
+                self._update_achievement_notification()
+                self.stats.save()
+        return False
+
+    def _sync_game_audio(self, was_paused):
+        paused = bool(getattr(self, "paused", False))
+        if paused != was_paused:
+            self.audio.play_sound(AudioManager.SOUND_PAUSE if paused else AudioManager.SOUND_RESUME)
+        suspended = paused or self._focus_paused or not self._window_focused or self._terminal()
+        if suspended != self._audio_suspended:
+            self._audio_suspended = suspended
+            if suspended:
+                self.audio.pause_music()
+            else:
+                self.audio.resume_music()
 
     def run(self):
-        """Main game loop. Handles events, input, update, and render cycle.
-
-        This is a concrete method that provides the standard game loop.
-        Override only if you need custom loop behavior.
-        """
-        dt = 0
-
-        while True:
-            # Event processing
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self._track_session_stats()
-                    pygame.quit()
-                    sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self._track_session_stats()
+        if not self.demo_mode:
+            self.audio.play_music(f"{self.game_key}_theme")
+            self.audio.play_sound(AudioManager.SOUND_START)
+        try:
+            while True:
+                elapsed = self.clock.tick(engine.FPS) / 1000.0
+                for event in pygame.event.get():
+                    if engine.handle_global_event(event):
+                        continue
+                    if event.type in (pygame.WINDOWFOCUSLOST, pygame.WINDOWFOCUSGAINED):
+                        self._set_window_focus(event.type == pygame.WINDOWFOCUSGAINED)
+                        continue
+                    if self._window_focused or event.type in (
+                        pygame.JOYDEVICEADDED,
+                        pygame.JOYDEVICEREMOVED,
+                    ):
+                        self.input_manager.handle_event(event)
+                    if event.type == pygame.QUIT:
+                        self.quit_requested = True
                         return
-                    if event.key == pygame.K_m:
+                    if (
+                        self._window_focused
+                        and event.type == pygame.KEYDOWN
+                        and event.key == pygame.K_m
+                    ):
                         self.audio.toggle_mute()
-
-            # Handle input - exit if returns True
-            if self.handle_input():
-                self._track_session_stats()
-                return
-
-            # Update game logic with delta time
-            self.update(dt)
-
-            # Update achievement notifications
-            self._update_achievement_notification()
-
-            # Render the frame
-            self.render()
-
-            # Draw achievement notification on top
-            self._draw_achievement_notification()
-
-            # Display and timing (uses scaling in fullscreen mode)
-            engine.scale_to_screen()
-            dt = self.clock.tick(60) / 1000.0  # Convert ms to seconds
+                if self.advance(elapsed):
+                    return
+                self.render()
+                if self._focus_paused:
+                    self._draw_pause_overlay()
+                self._draw_achievement_notification()
+                engine.scale_to_screen()
+        finally:
+            if not self.demo_mode:
+                self.audio.stop_music()
+            self._track_session_stats()

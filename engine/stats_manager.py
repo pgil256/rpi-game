@@ -1,5 +1,5 @@
 """
-Statistics tracking for the Weasel Entertainment System.
+Statistics tracking for the Winston Entertainment System.
 
 Tracks and persists gameplay statistics like play time, games played, deaths, etc.
 
@@ -19,8 +19,9 @@ Usage:
     total_time = stats.get('global', 'play_time')
 """
 
-import json
-from pathlib import Path
+import math
+from copy import deepcopy
+from engine.persistence import JsonStore, data_path, is_demo
 from typing import Optional, Any
 
 
@@ -33,71 +34,81 @@ class StatsManager:
         Args:
             save_file: Name of the JSON file to store stats.
         """
-        self.save_path = Path(__file__).parent.parent / save_file
+        self.save_path = data_path(save_file)
+        self._store = JsonStore(self.save_path, legacy_name=save_file)
+        self._dirty = False
         self.stats = self._load()
 
     def _load(self) -> dict:
-        """Load stats from file."""
-        if self.save_path.exists():
-            try:
-                return json.loads(self.save_path.read_text())
-            except (json.JSONDecodeError, IOError):
-                return self._default_stats()
-        return self._default_stats()
+        result = self._default_stats()
+        for category, values in self._store.load().items():
+            if isinstance(values, dict):
+                valid = {
+                    k: v
+                    for k, v in values.items()
+                    if isinstance(v, (int, float))
+                    and not isinstance(v, bool)
+                    and math.isfinite(v)
+                    and v >= 0
+                }
+                result.setdefault(category, {}).update(valid)
+        return result
 
     def _default_stats(self) -> dict:
         """Return default stats structure."""
         return {
-            'global': {
-                'total_play_time': 0,  # Total seconds played
-                'games_started': 0,    # Total games started
-                'games_completed': 0,  # Total games completed/won
+            "global": {
+                "total_play_time": 0,  # Total seconds played
+                "games_started": 0,  # Total games started
+                "games_completed": 0,  # Total games completed/won
             },
-            'snake': {
-                'games_played': 0,
-                'total_score': 0,
-                'highest_length': 0,
-                'deaths': 0,
+            "snake": {
+                "games_played": 0,
+                "total_score": 0,
+                "highest_length": 0,
+                "deaths": 0,
             },
-            'pacman': {
-                'games_played': 0,
-                'total_score': 0,
-                'ghosts_eaten': 0,
-                'levels_cleared': 0,
-                'deaths': 0,
+            "pacman": {
+                "games_played": 0,
+                "total_score": 0,
+                "ghosts_eaten": 0,
+                "levels_cleared": 0,
+                "deaths": 0,
             },
-            'frogger': {
-                'games_played': 0,
-                'crossings': 0,
-                'deaths': 0,
+            "frogger": {
+                "games_played": 0,
+                "crossings": 0,
+                "deaths": 0,
             },
-            'centipede': {
-                'games_played': 0,
-                'total_score': 0,
-                'centipedes_destroyed': 0,
-                'spiders_killed': 0,
-                'deaths': 0,
+            "centipede": {
+                "games_played": 0,
+                "total_score": 0,
+                "centipedes_destroyed": 0,
+                "spiders_killed": 0,
+                "deaths": 0,
             },
-            'digdug': {
-                'games_played': 0,
-                'crystals_collected': 0,
-                'wins': 0,
-                'deaths': 0,
+            "digdug": {
+                "games_played": 0,
+                "crystals_collected": 0,
+                "wins": 0,
+                "deaths": 0,
             },
-            'boulderdash': {
-                'games_played': 0,
-                'diamonds_collected': 0,
-                'levels_completed': 0,
-                'deaths': 0,
+            "boulderdash": {
+                "games_played": 0,
+                "diamonds_collected": 0,
+                "levels_completed": 0,
+                "deaths": 0,
             },
         }
 
-    def save(self) -> None:
-        """Save stats to file."""
-        try:
-            self.save_path.write_text(json.dumps(self.stats, indent=2))
-        except IOError:
-            pass  # Fail silently
+    def save(self) -> bool:
+        """Flush a batch of changes; the game loop calls this after each step."""
+        if is_demo() or not self._dirty:
+            return False
+        saved = self._store.save(self.stats)
+        if saved:
+            self._dirty = False
+        return saved
 
     def get(self, category: str, stat_name: str, default: Any = 0) -> Any:
         """Get a statistic value.
@@ -122,10 +133,13 @@ class StatsManager:
             stat_name: Name of the statistic
             value: Value to set
         """
+        if is_demo():
+            return
         if category not in self.stats:
             self.stats[category] = {}
-        self.stats[category][stat_name] = value
-        self.save()
+        if self.stats[category].get(stat_name) != value:
+            self.stats[category][stat_name] = value
+            self._dirty = True
 
     def increment(self, category: str, stat_name: str, amount: int = 1) -> int:
         """Increment a statistic by amount.
@@ -186,8 +200,28 @@ class StatsManager:
             Dictionary of stats.
         """
         if category:
-            return self.stats.get(category, {})
-        return self.stats
+            return deepcopy(self.stats.get(category, {}))
+        return deepcopy(self.stats)
+
+    def best_clear(self, game, difficulty):
+        ticks = self.get(game, f"best_clear_ticks_{difficulty.name.lower()}")
+        return ticks if type(ticks) is int and ticks > 0 else None
+
+    def record_clear(self, game, difficulty, ticks):
+        best = self.best_clear(game, difficulty)
+        if is_demo() or ticks <= 0 or (best is not None and ticks >= best):
+            return False
+        self.set(game, f"best_clear_ticks_{difficulty.name.lower()}", ticks)
+        return True
+
+    @staticmethod
+    def format_clear(ticks):
+        from engine import FPS
+
+        if not ticks:
+            return "—"
+        seconds, remainder = divmod(ticks, FPS)
+        return f"{seconds // 60}:{seconds % 60:02d}.{remainder * 100 // FPS:02d}"
 
     def format_play_time(self, seconds: float) -> str:
         """Format play time in human-readable format.
